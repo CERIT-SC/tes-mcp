@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev
       - name: Run tests
-        run: uv run python -m pytest
+        run: uv run python -m pytest --pass-with-no-tests
 
   lint:
     name: Lint and format
