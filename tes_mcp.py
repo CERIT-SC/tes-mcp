@@ -1,14 +1,13 @@
 """MCP server for submitting file-creation tasks to a TES endpoint."""
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import shlex
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx2
 
 from mcp.server import MCPServer
 
@@ -27,27 +26,24 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
     tes_url = _required_setting("TES_URL").rstrip("/")
     username = _required_setting("TES_USERNAME")
     password = _required_setting("TES_PASSWORD")
-    credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
-
-    request = Request(
-        f"{tes_url}/tasks",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
 
     try:
-        with urlopen(request, timeout=30) as response:
-            response_body = response.read().decode()
-    except HTTPError as error:
-        detail = error.read().decode(errors="replace")
-        raise RuntimeError(f"TES returned HTTP {error.code}: {detail}") from error
-    except URLError as error:
-        raise RuntimeError(f"Could not reach TES endpoint: {error.reason}") from error
+        response = httpx2.post(
+            f"{tes_url}/tasks",
+            json=payload,
+            auth=(username, password),
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        response_body = response.text
+    except httpx2.HTTPStatusError as error:
+        detail = error.response.text
+        raise RuntimeError(
+            f"TES returned HTTP {error.response.status_code}: {detail}"
+        ) from error
+    except httpx2.RequestError as error:
+        raise RuntimeError(f"Could not reach TES endpoint: {error}") from error
 
     if not response_body:
         return {"status": "submitted"}
