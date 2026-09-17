@@ -8,24 +8,23 @@ import shlex
 from typing import Any
 
 import httpx2
-
 from mcp.server import MCPServer
 
 logger = logging.getLogger(__name__)
 mcp = MCPServer("minio-task-server")
 
 
-def _required_setting(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Required environment variable {name} is not set")
-    return value
+def _get_required_setting(name: str) -> str:
+    """Get a required environment variable, raising an error if it is not set."""
+    if value := os.getenv(name):
+        return value
+    raise RuntimeError(f"Required environment variable {name} is not set.")
 
 
 def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
-    tes_url = _required_setting("TES_URL").rstrip("/")
-    username = _required_setting("TES_USERNAME")
-    password = _required_setting("TES_PASSWORD")
+    tes_url = _get_required_setting("TES_URL").rstrip("/")
+    username = _get_required_setting("TES_USERNAME")
+    password = _get_required_setting("TES_PASSWORD")
 
     try:
         response = httpx2.post(
@@ -61,8 +60,8 @@ async def create_empty_file(file_name: str) -> str:
     The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
     in the MCP environment file. The file name is provided when calling the tool.
     """
-    output_path = _required_setting("OUTPUT_PATH")
-    output_url = _required_setting(
+    output_path = _get_required_setting("OUTPUT_PATH")
+    output_url = _get_required_setting(
         "OUTPUT_URL"
     )  # add session ID here, should know it automatically from the header
     if not file_name.strip():
