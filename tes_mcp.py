@@ -22,6 +22,7 @@ def _get_required_setting(name: str) -> str:
 
 
 def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
+    """Submit a task to the TES endpoint and return the response as a dictionary."""
     tes_url = _get_required_setting("TES_URL").rstrip("/")
     username = _get_required_setting("TES_USERNAME")
     password = _get_required_setting("TES_PASSWORD")
@@ -35,7 +36,6 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
             timeout=30,
         )
         response.raise_for_status()
-        response_body = response.text
     except httpx2.HTTPStatusError as error:
         detail = error.response.text
         raise RuntimeError(
@@ -43,14 +43,10 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
         ) from error
     except httpx2.RequestError as error:
         raise RuntimeError(f"Could not reach TES endpoint: {error}") from error
-
-    if not response_body:
-        return {"status": "submitted"}
-
     try:
-        return json.loads(response_body)
+        return json.loads(response.text)
     except json.JSONDecodeError:
-        return {"status": "submitted", "response": response_body}
+        return {"status": "submitted", "response": response.text}
 
 
 @mcp.tool()
