@@ -60,9 +60,7 @@ async def run_script(script: str, output_file_name: str | None = None) -> str:
     output file.
     """
     output_path = _get_required_setting("OUTPUT_PATH")
-    output_url = _get_required_setting(
-        "OUTPUT_URL"
-    )
+    output_url = _get_required_setting("OUTPUT_URL")
     if not script.strip():
         raise ValueError("script must not be empty")
     if not output_path.strip():

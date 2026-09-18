@@ -27,9 +27,7 @@ def test_run_script_submits_response(monkeypatch, submitted_task):
     monkeypatch.setenv("OUTPUT_PATH", "/results")
     monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
 
-    result = asyncio.run(
-        tes_mcp.run_script("echo 2", "results56.txt")
-    )
+    result = asyncio.run(tes_mcp.run_script("echo 2", "results56.txt"))
 
     assert json.loads(result) == {"id": "task-123"}
     assert submitted_task["outputs"][0]["path"] == "/results/results56.txt"
