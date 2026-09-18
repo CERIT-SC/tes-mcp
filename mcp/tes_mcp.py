@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from typing import Any
 
 import httpx2
@@ -70,31 +71,29 @@ async def run_script(
     if not output_url.strip():
         raise ValueError("output_url must not be empty")
 
-    session_id = ctx.headers.get("MCP-Session-Id")
-    if not session_id:
-        raise ValueError("MCP-Session-Id header is required in the context")
+    session_id = (ctx.headers or {}).get("MCP-Session-Id", uuid.uuid4().hex)
 
-    output_dir_url = output_url.rstrip("/") + "/" + session_id
+    output_file_url = output_url.rstrip("/") + "/" + session_id
     payload = {
         "name": "run-script",
         "inputs": [
             {
                 "path": output_path,
-                "url": output_dir_url,
+                "url": output_file_url,
                 "type": "DIRECTORY",
             }
         ],
         "outputs": [
             {
                 "path": output_path,
-                "url": output_dir_url,
+                "url": output_file_url,
                 "type": "DIRECTORY",
             }
         ],
         "executors": [
             {
                 "image": "ubuntu:20.04",
-                "workdir": "/data",
+                "workdir": output_path,
                 "command": [
                     "/bin/sh",
                     "-c",
@@ -104,11 +103,11 @@ async def run_script(
         ],
     }
 
-    logger.info("Submitting run-script task for %s", output_dir_url)
+    logger.info("Submitting run-script task for %s", output_path)
     result = await asyncio.to_thread(_submit_task, payload)
     return json.dumps(result, indent=2)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    mcp.run(transport="streamable-http", port=8001, stateless_http=True)
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8001, stateless_http=True)
