@@ -3,10 +3,11 @@ import json
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
+sys.path.insert(0, str(Path(__file__).parents[1] / "mcp"))
 
 import tes_mcp
 
@@ -26,9 +27,11 @@ def submitted_task(monkeypatch):
 def test_run_script_submits_response(monkeypatch, submitted_task):
     monkeypatch.setenv("OUTPUT_PATH", "/results")
     monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
-    monkeypatch.setattr(tes_mcp, "_PROCESS_SESSION_ID", "session-123")
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
-    result = asyncio.run(tes_mcp.run_script("echo 2", "results56.txt"))
+    result = asyncio.run(
+        tes_mcp.run_script("echo 2", prompt_file_name="results56.txt", ctx=context)
+    )
 
     assert json.loads(result) == {"id": "task-123"}
     assert submitted_task["outputs"][0]["path"] == "/results/results56.txt"
@@ -39,20 +42,34 @@ def test_run_script_submits_response(monkeypatch, submitted_task):
     assert submitted_task["executors"][0]["command"] == [
         "/bin/sh",
         "-c",
-        "exec > /results/results56.txt\necho 2",
+        "echo 2",
     ]
 
 
 def test_run_script_invents_output_file_name(monkeypatch, submitted_task):
     monkeypatch.setenv("OUTPUT_PATH", "/results")
     monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
-    monkeypatch.setattr(tes_mcp, "_PROCESS_SESSION_ID", "session-123")
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
-    asyncio.run(tes_mcp.run_script("echo 2"))
+    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
 
     command = submitted_task["executors"][0]["command"]
     match = re.fullmatch(
-        r"exec > /results/(results-[0-9a-f]{32}\.txt)\necho 2",
+        r"echo 2",
         command[2],
     )
     assert match is not None
+
+
+def test_run_script_uses_session_id_from_context(monkeypatch, submitted_task):
+    monkeypatch.setenv("OUTPUT_PATH", "/results")
+    monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
+    context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})
+
+    asyncio.run(
+        tes_mcp.run_script("echo 2", prompt_file_name="results56.txt", ctx=context)
+    )
+
+    assert submitted_task["outputs"][0]["url"] == (
+        "s3://bucket/results/request-session/results56.txt"
+    )
