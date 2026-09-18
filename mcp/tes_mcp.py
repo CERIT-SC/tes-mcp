@@ -10,10 +10,10 @@ from uuid import uuid4
 
 import httpx2
 from mcp.server import MCPServer
+from mcp.server.mcpserver.context import Context
 
 logger = logging.getLogger(__name__)
 mcp = MCPServer("minio-task-server")
-_PROCESS_SESSION_ID = uuid4().hex
 
 
 def _get_required_setting(name: str) -> str:
@@ -52,7 +52,11 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def run_script(script: str, prompt_file_name: str | None = None) -> str:
+async def run_script(
+    script: str,
+    ctx: Context,
+    prompt_file_name: str | None = None,
+) -> str:
     """Submit a task that runs a shell script and saves its output.
 
     The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
@@ -69,12 +73,11 @@ async def run_script(script: str, prompt_file_name: str | None = None) -> str:
     if not output_url.strip():
         raise ValueError("output_url must not be empty")
 
+    session_id = ctx.headers.get("MCP-Session-Id")
     output_file_name = _create_file_name(prompt_file_name)
 
     output_file_path = output_path.rstrip("/") + "/" + output_file_name
-    output_file_url = (
-        output_url.rstrip("/") + "/" + _PROCESS_SESSION_ID + "/" + output_file_name
-    )
+    output_file_url = output_url.rstrip("/") + "/" + session_id + "/" + output_file_name
     payload = {
         "name": "run-script",
         "inputs": [],
@@ -88,10 +91,11 @@ async def run_script(script: str, prompt_file_name: str | None = None) -> str:
         "executors": [
             {
                 "image": "ubuntu:20.04",
+                "workdir": "/data",
                 "command": [
                     "/bin/sh",
                     "-c",
-                    f"exec > {shlex.quote(output_file_path)}\n{script}",
+                    f"{script}",
                 ],
             }
         ],
@@ -113,4 +117,4 @@ def _create_file_name(prompt_file_name: str | None) -> str:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    mcp.run(transport="stdio")
+    mcp.run(transport="streamable-http", port=8001, stateless_http=True)
