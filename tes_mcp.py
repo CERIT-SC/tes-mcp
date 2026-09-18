@@ -6,13 +6,16 @@ import logging
 import os
 import shlex
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx2
 from mcp.server import MCPServer
+from mcp.server.mcpserver.context import Context
 
 logger = logging.getLogger(__name__)
 mcp = MCPServer("minio-task-server")
+_PROCESS_SESSION_ID = uuid4().hex
 
 
 def _get_required_setting(name: str) -> str:
@@ -51,7 +54,9 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def run_script(script: str, output_file_name: str | None = None) -> str:
+async def run_script(
+    script: str, output_file_name: str | None = None, ctx: Context | None = None
+) -> str:
     """Submit a task that runs a shell script and saves its output.
 
     The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
@@ -68,11 +73,21 @@ async def run_script(script: str, output_file_name: str | None = None) -> str:
     if not output_url.strip():
         raise ValueError("output_url must not be empty")
 
+    session_id = None
+    if ctx is not None:
+        session_id = _PROCESS_SESSION_ID
+        request = ctx.request_context.request
+        if request is not None:
+            session_id = request.headers.get("MCP-Session-Id") or session_id
+
     output_file_name = output_file_name.strip() if output_file_name else ""
     if not output_file_name:
         output_file_name = f"results-{uuid4().hex}.txt"
     output_file_path = output_path.rstrip("/") + "/" + output_file_name
-    output_file_url = output_url.rstrip("/") + "/" + output_file_name
+    output_file_url = output_url.rstrip("/")
+    if session_id:
+        output_file_url += "/" + quote(session_id, safe="")
+    output_file_url += "/" + output_file_name
     payload = {
         "name": "run-script",
         "inputs": [],
