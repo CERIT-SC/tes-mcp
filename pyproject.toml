@@ -5,7 +5,9 @@ description = "MCP server for TES"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx2>=2.5.0",
     "mcp[cli]>=2.0.0",
+    "mcpo>=0.0.20",
 ]
 
 [project.optional-dependencies]
