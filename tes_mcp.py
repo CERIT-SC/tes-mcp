@@ -6,6 +6,7 @@ import logging
 import os
 import shlex
 from typing import Any
+from uuid import uuid4
 
 import httpx2
 from mcp.server import MCPServer
@@ -50,31 +51,38 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def create_empty_file(file_name: str) -> str:
-    """Submit a task that creates an empty file in the requested output directory.
+async def run_script(script: str, output_file_name: str | None = None) -> str:
+    """Submit a task that runs a shell script and saves its output.
 
     The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
-    in the MCP environment file. The file name is provided when calling the tool.
+    in the MCP environment file. The script and optional output file name are
+    provided when calling the tool. The script's standard output is saved to the
+    output file.
     """
     output_path = _get_required_setting("OUTPUT_PATH")
     output_url = _get_required_setting(
         "OUTPUT_URL"
-    )  # add session ID here, should know it automatically from the header
-    if not file_name.strip():
-        raise ValueError("file_name must not be empty")
+    )
+    if not script.strip():
+        raise ValueError("script must not be empty")
     if not output_path.strip():
         raise ValueError("output_path must not be empty")
     if not output_url.strip():
         raise ValueError("output_url must not be empty")
 
+    output_file_name = output_file_name.strip() if output_file_name else ""
+    if not output_file_name:
+        output_file_name = f"results-{uuid4().hex}.txt"
+    output_file_path = output_path.rstrip("/") + "/" + output_file_name
+    output_file_url = output_url.rstrip("/") + "/" + output_file_name
     payload = {
-        "name": "create-empty-file",
+        "name": "run-script",
         "inputs": [],
         "outputs": [
             {
-                "path": output_path,
-                "url": output_url,
-                "type": "DIRECTORY",
+                "path": output_file_path,
+                "url": output_file_url,
+                "type": "FILE",
             }
         ],
         "executors": [
@@ -83,13 +91,13 @@ async def create_empty_file(file_name: str) -> str:
                 "command": [
                     "/bin/sh",
                     "-c",
-                    f"touch {shlex.quote(output_path.rstrip('/') + '/' + file_name)}",
+                    f"exec > {shlex.quote(output_file_path)}\n{script}",
                 ],
             }
         ],
     }
 
-    logger.info("Submitting create-empty-file task for %s", output_path)
+    logger.info("Submitting run-script task for %s", output_file_path)
     result = await asyncio.to_thread(_submit_task, payload)
     return json.dumps(result, indent=2)
 
