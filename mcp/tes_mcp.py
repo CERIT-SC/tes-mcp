@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from typing import Any
-from uuid import uuid4
 
 import httpx2
 from mcp.server import MCPServer
@@ -54,7 +53,6 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
 async def run_script(
     script: str,
     ctx: Context,
-    prompt_file_name: str | None = None,
 ) -> str:
     """Submit a task that runs a shell script and saves its output.
 
@@ -73,18 +71,24 @@ async def run_script(
         raise ValueError("output_url must not be empty")
 
     session_id = ctx.headers.get("MCP-Session-Id")
-    output_file_name = _create_file_name(prompt_file_name)
+    if not session_id:
+        raise ValueError("MCP-Session-Id header is required in the context")
 
-    output_file_path = output_path.rstrip("/") + "/" + output_file_name
-    output_file_url = output_url.rstrip("/") + "/" + session_id + "/" + output_file_name
+    output_dir_url = output_url.rstrip("/") + "/" + session_id
     payload = {
         "name": "run-script",
-        "inputs": [],
+        "inputs": [
+            {
+                "path": output_path,
+                "url": output_dir_url,
+                "type": "DIRECTORY",
+            }
+        ],
         "outputs": [
             {
-                "path": output_file_path,
-                "url": output_file_url,
-                "type": "FILE",
+                "path": output_path,
+                "url": output_dir_url,
+                "type": "DIRECTORY",
             }
         ],
         "executors": [
@@ -100,18 +104,9 @@ async def run_script(
         ],
     }
 
-    logger.info("Submitting run-script task for %s", output_file_path)
+    logger.info("Submitting run-script task for %s", output_dir_url)
     result = await asyncio.to_thread(_submit_task, payload)
     return json.dumps(result, indent=2)
-
-
-def _create_file_name(prompt_file_name: str | None) -> str:
-    """Create a file name for the output file. If the prompt provides a file name, use it; otherwise, generate a unique name."""
-    if prompt_file_name:
-        output_file_name = prompt_file_name.strip()
-    else:
-        output_file_name = f"results-{uuid4().hex}.txt"
-    return output_file_name
 
 
 if __name__ == "__main__":
