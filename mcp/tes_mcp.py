@@ -42,6 +42,7 @@ async def run_script(
     output_file_url = output_url.rstrip("/") + "/" + session_id
     payload = {
         "name": "run-script",
+        "tags": {"MCP-Session-Id": session_id},
         "inputs": [
             {
                 "path": output_path,
@@ -75,14 +76,21 @@ async def run_script(
 
 
 @mcp.tool()
-async def list_tasks() -> str:
-    """Return the full list of tasks from the TES endpoint."""
-    result = await asyncio.to_thread(
-        _make_tes_request,
-        "get",
-        params={"view": "FULL", "page_size": 100},
-    )
-    return json.dumps(result, indent=2)
+async def list_tasks(ctx: Context) -> str:
+    """Return the full list of tasks from the TES endpoint, filtered by the session ID."""
+    if session_id := (ctx.headers or {}).get("MCP-Session-Id"):
+        result = await asyncio.to_thread(
+            _make_tes_request,
+            "get",
+            params={
+                "view": "FULL",
+                "page_size": 100,
+                "tag_key": ["MCP-Session-Id"],
+                "tag_value": [session_id],
+            },
+        )
+        return json.dumps(result, indent=2)
+    raise ValueError("Session ID is missing. Cannot list tasks without a session ID.")
 
 
 @mcp.tool()

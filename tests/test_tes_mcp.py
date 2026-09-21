@@ -33,6 +33,7 @@ def test_run_script_submits_response(monkeypatch, tes_request):
     assert json.loads(result) == {"id": "task-123"}
     assert tes_request["method"] == "post"
     assert tes_request["path"] == "/tasks"
+    assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
     assert tes_request["json"]["outputs"][0] == {
         "path": "/results",
         "url": "s3://bucket/results/session-123",
@@ -68,15 +69,34 @@ def test_run_script_uses_session_id_from_context(monkeypatch, tes_request):
     )
 
 
-def test_list_tasks_requests_full_page(monkeypatch, tes_request):
-    result = asyncio.run(tes_mcp.list_tasks())
+def test_list_tasks_requests_session_tasks(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    result = asyncio.run(tes_mcp.list_tasks(ctx=context))
 
     assert json.loads(result) == {"id": "task-123"}
     assert tes_request == {
         "method": "get",
         "path": "/tasks",
-        "params": {"view": "FULL", "page_size": 100},
+        "params": {
+            "view": "FULL",
+            "page_size": 100,
+            "tag_key": ["MCP-Session-Id"],
+            "tag_value": ["session-123"],
+        },
     }
+
+
+def test_list_tasks_rejects_missing_session_id(tes_request):
+    context = SimpleNamespace(headers=None)
+
+    with pytest.raises(
+        ValueError,
+        match="Session ID is missing. Cannot list tasks without a session ID.",
+    ):
+        asyncio.run(tes_mcp.list_tasks(ctx=context))
+
+    assert tes_request == {}
 
 
 def test_get_service_info_requests_service_info(monkeypatch, tes_request):
