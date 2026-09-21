@@ -21,7 +21,10 @@ async def run_script(
     script: str,
     ctx: Context,
 ) -> str:
-    """Submit a task that runs a shell script and saves its output.
+    """Run a shell script remotely and save its standard output.
+
+    Use this tool whenever the user asks to execute a command or script, or
+    create a file from command output.
 
     The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
     in the MCP environment file. The script and optional output file name are
@@ -77,7 +80,7 @@ async def run_script(
 
 @mcp.tool()
 async def list_tasks(ctx: Context) -> str:
-    """Return the full list of tasks from the TES endpoint, filtered by the session ID."""
+    """List tasks submitted during the current MCP session."""
     if session_id := (ctx.headers or {}).get("MCP-Session-Id"):
         result = await asyncio.to_thread(
             _make_tes_request,
@@ -95,14 +98,14 @@ async def list_tasks(ctx: Context) -> str:
 
 @mcp.tool()
 async def get_service_info() -> str:
-    """Return service information from the TES endpoint."""
+    """Return information about the remote execution service."""
     result = await asyncio.to_thread(_make_tes_request, "get", path="/service-info")
     return json.dumps(result, indent=2)
 
 
 @mcp.tool()
 async def get_task(task_id: str) -> str:
-    """Return full details for a TES task."""
+    """Return full details and the current status of a submitted task."""
     result = await asyncio.to_thread(
         _make_tes_request,
         "get",
@@ -114,7 +117,7 @@ async def get_task(task_id: str) -> str:
 
 @mcp.tool()
 async def cancel_task(task_id: str) -> str:
-    """Cancel a TES task and return the endpoint response."""
+    """Cancel a submitted remote execution task."""
     result = await asyncio.to_thread(
         _make_tes_request,
         "post",
