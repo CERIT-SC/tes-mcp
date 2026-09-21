@@ -2,7 +2,7 @@
 
 TES (Task Execution Service) as an MCP tool, enabling users to execute scripts in a managed execution environment and persist outputs to S3 storage.
 
-- `run_script` - run a script via TES and store its outputs in S3.
-- `list_tasks` - list the tasks of the current MCP session.
-- `get_task` / `cancel_task` - inspect or cancel a task.
-- `get_service_info` - query the remote TES service.
+- Run scripts via TES and store generated outputs in S3-compatible storage.
+- List TES tasks associated with a specific session.
+- Retrieve detailed information about individual TES tasks, including status and execution metadata.
+- Cancel running TES tasks when they are no longer needed.
