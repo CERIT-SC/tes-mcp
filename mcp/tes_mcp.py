@@ -16,47 +16,6 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer("minio-task-server")
 
 
-def _get_required_setting(name: str) -> str:
-    """Get a required environment variable, raising an error if it is not set."""
-    if value := os.getenv(name):
-        return value
-    raise RuntimeError(f"Required environment variable {name} is not set.")
-
-
-def _tes_request(
-    method: str,
-    path: str = "/tasks",
-    **request_kwargs: Any,
-) -> dict[str, Any]:
-    """Send an authenticated request to TES and return its response."""
-    tes_url = _get_required_setting("TES_URL").rstrip("/")
-    username = _get_required_setting("TES_USERNAME")
-    password = _get_required_setting("TES_PASSWORD")
-
-    try:
-        response = getattr(httpx2, method)(
-            f"{tes_url}{path}",
-            auth=(username, password),
-            headers={"Accept": "application/json"},
-            timeout=30,
-            **request_kwargs,
-        )
-        response.raise_for_status()
-    except httpx2.HTTPStatusError as error:
-        detail = error.response.text
-        raise RuntimeError(
-            f"TES returned HTTP {error.response.status_code}: {detail}"
-        ) from error
-    except httpx2.RequestError as error:
-        raise RuntimeError(f"Could not reach TES endpoint: {error}") from error
-    try:
-        return json.loads(response.text)
-    except json.JSONDecodeError:
-        if method == "post":
-            return {"status": "submitted", "response": response.text}
-        return {"response": response.text}
-
-
 @mcp.tool()
 async def run_script(
     script: str,
@@ -133,12 +92,6 @@ async def get_service_info() -> str:
     return json.dumps(result, indent=2)
 
 
-def _task_path(task_id: str, suffix: str = "") -> str:
-    if not task_id.strip():
-        raise ValueError("task_id must not be empty")
-    return f"/tasks/{quote(task_id, safe='')}{suffix}"
-
-
 @mcp.tool()
 async def get_task(task_id: str) -> str:
     """Return full details for a TES task."""
@@ -160,6 +113,54 @@ async def cancel_task(task_id: str) -> str:
         path=_task_path(task_id, ":cancel"),
     )
     return json.dumps(result, indent=2)
+
+
+def _tes_request(
+    method: str,
+    path: str = "/tasks",
+    **request_kwargs: Any,
+) -> dict[str, Any]:
+    """Send an authenticated request to TES and return its response."""
+    tes_url = _get_required_setting("TES_URL").rstrip("/")
+    username = _get_required_setting("TES_USERNAME")
+    password = _get_required_setting("TES_PASSWORD")
+
+    try:
+        response = getattr(httpx2, method)(
+            f"{tes_url}{path}",
+            auth=(username, password),
+            headers={"Accept": "application/json"},
+            timeout=30,
+            **request_kwargs,
+        )
+        response.raise_for_status()
+    except httpx2.HTTPStatusError as error:
+        detail = error.response.text
+        raise RuntimeError(
+            f"TES returned HTTP {error.response.status_code}: {detail}"
+        ) from error
+    except httpx2.RequestError as error:
+        raise RuntimeError(f"Could not reach TES endpoint: {error}") from error
+    try:
+        return json.loads(response.text)
+    except json.JSONDecodeError:
+        if method == "post":
+            return {"status": "submitted", "response": response.text}
+        return {"response": response.text}
+
+
+def _get_required_setting(name: str) -> str:
+    """Get a required environment variable, raising an error if it is not set."""
+    if value := os.getenv(name):
+        return value
+    raise RuntimeError(f"Required environment variable {name} is not set.")
+
+
+def _task_path(task_id: str, suffix: str = "") -> str:
+    """Return the TES path for a task, optionally with a suffix."""
+    if not task_id.strip():
+        raise ValueError("task_id must not be empty")
+    return f"/tasks/{quote(task_id, safe='')}{suffix}"
 
 
 if __name__ == "__main__":
