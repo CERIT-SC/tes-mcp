@@ -8,6 +8,7 @@ dependencies = [
     "httpx2>=2.5.0",
     "mcp[cli]>=2.0.0",
     "mcpo>=0.0.20",
+    "pydantic-settings>=2.0.0",
 ]
 
 [project.optional-dependencies]

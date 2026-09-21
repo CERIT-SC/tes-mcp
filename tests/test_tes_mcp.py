@@ -5,15 +5,36 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "mcp"))
 
 import tes_mcp
 
 
+def test_settings_rejects_invalid_tes_url():
+    with pytest.raises(ValidationError, match="tes_url"):
+        tes_mcp.Settings(
+            _env_file=None,
+            tes_url="not-a-url",
+            tes_username="username",
+            tes_password="password",
+            output_path="/results",
+            output_url="s3://bucket/results",
+        )
+
+
 @pytest.fixture
 def tes_request(monkeypatch):
     request = {}
+    settings = tes_mcp.Settings(
+        tes_url="https://tes.example.com",
+        tes_username="username",
+        tes_password="password",
+        output_path="/results",
+        output_url="s3://bucket/results",
+    )
+    monkeypatch.setattr(tes_mcp, "settings", settings)
 
     def fake_tes_request(method, path="/tasks", **kwargs):
         request.update(method=method, path=path, **kwargs)
@@ -24,8 +45,6 @@ def tes_request(monkeypatch):
 
 
 def test_run_script_submits_response(monkeypatch, tes_request):
-    monkeypatch.setenv("OUTPUT_PATH", "/results")
-    monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
     result = asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
@@ -47,8 +66,6 @@ def test_run_script_submits_response(monkeypatch, tes_request):
 
 
 def test_run_script_uses_configured_output_directory(monkeypatch, tes_request):
-    monkeypatch.setenv("OUTPUT_PATH", "/results")
-    monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
     asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
@@ -58,8 +75,6 @@ def test_run_script_uses_configured_output_directory(monkeypatch, tes_request):
 
 
 def test_run_script_uses_session_id_from_context(monkeypatch, tes_request):
-    monkeypatch.setenv("OUTPUT_PATH", "/results")
-    monkeypatch.setenv("OUTPUT_URL", "s3://bucket/results")
     context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})
 
     asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
@@ -67,6 +82,37 @@ def test_run_script_uses_session_id_from_context(monkeypatch, tes_request):
     assert tes_request["json"]["outputs"][0]["url"] == (
         "s3://bucket/results/request-session"
     )
+
+
+def test_run_script_uses_configured_session_id_over_context(monkeypatch, tes_request):
+    tes_mcp.settings.session_id = "configured-session"
+    context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})
+
+    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+
+    assert tes_request["json"]["outputs"][0]["url"] == (
+        "s3://bucket/results/configured-session"
+    )
+
+
+def test_run_script_uses_configured_session_header(monkeypatch, tes_request):
+    tes_mcp.settings.session_id_header_key = "X-Session-Id"
+    context = SimpleNamespace(headers={"X-Session-Id": "custom-session"})
+
+    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+
+    assert tes_request["json"]["outputs"][0]["url"] == (
+        "s3://bucket/results/custom-session"
+    )
+
+
+def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
+    tes_mcp.settings.executor_image = "python:3.12"
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+
+    assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
 
 
 def test_list_tasks_requests_session_tasks(monkeypatch, tes_request):
@@ -85,6 +131,15 @@ def test_list_tasks_requests_session_tasks(monkeypatch, tes_request):
             "tag_value": ["session-123"],
         },
     }
+
+
+def test_list_tasks_uses_configured_session_id(monkeypatch, tes_request):
+    tes_mcp.settings.session_id = "configured-session"
+    context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})
+
+    asyncio.run(tes_mcp.list_tasks(ctx=context))
+
+    assert tes_request["params"]["tag_value"] == ["configured-session"]
 
 
 def test_list_tasks_rejects_missing_session_id(tes_request):

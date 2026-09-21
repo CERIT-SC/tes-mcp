@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 import uuid
 from typing import Any
 from urllib.parse import quote
@@ -11,9 +10,30 @@ from urllib.parse import quote
 import httpx2
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
+from pydantic import AnyHttpUrl, AnyUrl, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    tes_url: AnyHttpUrl
+    tes_username: str = Field(min_length=1)
+    tes_password: str = Field(min_length=1)
+    output_path: str = Field(min_length=1)
+    output_url: AnyUrl
+    session_id: str | None = None
+    session_id_header_key: str = Field(default="MCP-Session-Id", min_length=1)
+    executor_image: str = Field(default="ubuntu:20.04", min_length=1)
+
 
 logger = logging.getLogger(__name__)
 mcp = MCPServer("tes")
+settings = Settings()  # type: ignore[call-arg]
 
 
 @mcp.tool()
@@ -31,16 +51,12 @@ async def run_script(
     provided when calling the tool. The script's standard output is saved to the
     output file.
     """
-    output_path = _get_required_setting("OUTPUT_PATH")
-    output_url = _get_required_setting("OUTPUT_URL")
+    output_path = settings.output_path
+    output_url = str(settings.output_url)
     if not script.strip():
         raise ValueError("script must not be empty")
-    if not output_path.strip():
-        raise ValueError("output_path must not be empty")
-    if not output_url.strip():
-        raise ValueError("output_url must not be empty")
 
-    session_id = (ctx.headers or {}).get("MCP-Session-Id", uuid.uuid4().hex)
+    session_id = _get_session_id(ctx) or uuid.uuid4().hex
 
     output_file_url = output_url.rstrip("/") + "/" + session_id
     payload = {
@@ -62,7 +78,7 @@ async def run_script(
         ],
         "executors": [
             {
-                "image": "ubuntu:20.04",
+                "image": settings.executor_image,
                 "workdir": output_path,
                 "command": [
                     "/bin/sh",
@@ -81,7 +97,7 @@ async def run_script(
 @mcp.tool()
 async def list_tasks(ctx: Context) -> str:
     """List tasks submitted during the current MCP session."""
-    if session_id := (ctx.headers or {}).get("MCP-Session-Id"):
+    if session_id := _get_session_id(ctx):
         result = await asyncio.to_thread(
             _make_tes_request,
             "get",
@@ -132,9 +148,9 @@ def _make_tes_request(
     **request_kwargs: Any,
 ) -> dict[str, Any]:
     """Send an authenticated request to TES and return its response."""
-    tes_url = _get_required_setting("TES_URL").rstrip("/")
-    username = _get_required_setting("TES_USERNAME")
-    password = _get_required_setting("TES_PASSWORD")
+    tes_url = str(settings.tes_url).rstrip("/")
+    username = settings.tes_username
+    password = settings.tes_password
 
     try:
         response = getattr(httpx2, method)(
@@ -160,11 +176,12 @@ def _make_tes_request(
         return {"response": response.text}
 
 
-def _get_required_setting(name: str) -> str:
-    """Get a required environment variable, raising an error if it is not set."""
-    if value := os.getenv(name):
-        return value
-    raise RuntimeError(f"Required environment variable {name} is not set.")
+def _get_session_id(ctx: Context, default: str | None = None) -> str | None:
+    """Return the configured session ID, or the one supplied by the request."""
+    if settings.session_id:
+        return settings.session_id
+    session_id = (ctx.headers or {}).get(settings.session_id_header_key)
+    return session_id or default
 
 
 def _get_task_path(task_id: str, suffix: str = "") -> str:
