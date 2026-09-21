@@ -13,7 +13,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
 logger = logging.getLogger(__name__)
-mcp = MCPServer("minio-task-server")
+mcp = MCPServer("tes")
 
 
 @mcp.tool()
