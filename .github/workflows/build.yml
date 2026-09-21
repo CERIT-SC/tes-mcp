@@ -27,6 +27,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev
       - name: Run tests
+        env:
+          TES_URL: https://tes.example.com
+          TES_USERNAME: testuser123
+          TES_PASSWORD: testpassword123
+          OUTPUT_PATH: /results
+          OUTPUT_URL: s3://test-bucket/results
         run: uv run python -m pytest
 
   lint:
