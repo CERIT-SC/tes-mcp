@@ -19,7 +19,7 @@ def tes_request(monkeypatch):
         request.update(method=method, path=path, **kwargs)
         return {"id": "task-123"}
 
-    monkeypatch.setattr(tes_mcp, "_tes_request", fake_tes_request)
+    monkeypatch.setattr(tes_mcp, "_make_tes_request", fake_tes_request)
     return request
 
 

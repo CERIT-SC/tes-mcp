@@ -70,7 +70,7 @@ async def run_script(
     }
 
     logger.info("Submitting run-script task for %s", output_path)
-    result = await asyncio.to_thread(_tes_request, "post", json=payload)
+    result = await asyncio.to_thread(_make_tes_request, "post", json=payload)
     return json.dumps(result, indent=2)
 
 
@@ -78,7 +78,7 @@ async def run_script(
 async def list_tasks() -> str:
     """Return the full list of tasks from the TES endpoint."""
     result = await asyncio.to_thread(
-        _tes_request,
+        _make_tes_request,
         "get",
         params={"view": "FULL", "page_size": 100},
     )
@@ -88,7 +88,7 @@ async def list_tasks() -> str:
 @mcp.tool()
 async def get_service_info() -> str:
     """Return service information from the TES endpoint."""
-    result = await asyncio.to_thread(_tes_request, "get", path="/service-info")
+    result = await asyncio.to_thread(_make_tes_request, "get", path="/service-info")
     return json.dumps(result, indent=2)
 
 
@@ -96,9 +96,9 @@ async def get_service_info() -> str:
 async def get_task(task_id: str) -> str:
     """Return full details for a TES task."""
     result = await asyncio.to_thread(
-        _tes_request,
+        _make_tes_request,
         "get",
-        path=_task_path(task_id),
+        path=_get_task_path(task_id),
         params={"view": "FULL"},
     )
     return json.dumps(result, indent=2)
@@ -108,14 +108,14 @@ async def get_task(task_id: str) -> str:
 async def cancel_task(task_id: str) -> str:
     """Cancel a TES task and return the endpoint response."""
     result = await asyncio.to_thread(
-        _tes_request,
+        _make_tes_request,
         "post",
-        path=_task_path(task_id, ":cancel"),
+        path=_get_task_path(task_id, ":cancel"),
     )
     return json.dumps(result, indent=2)
 
 
-def _tes_request(
+def _make_tes_request(
     method: str,
     path: str = "/tasks",
     **request_kwargs: Any,
@@ -156,7 +156,7 @@ def _get_required_setting(name: str) -> str:
     raise RuntimeError(f"Required environment variable {name} is not set.")
 
 
-def _task_path(task_id: str, suffix: str = "") -> str:
+def _get_task_path(task_id: str, suffix: str = "") -> str:
     """Return the TES path for a task, optionally with a suffix."""
     if not task_id.strip():
         raise ValueError("task_id must not be empty")
