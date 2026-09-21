@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx2
 from mcp.server import MCPServer
@@ -22,19 +23,23 @@ def _get_required_setting(name: str) -> str:
     raise RuntimeError(f"Required environment variable {name} is not set.")
 
 
-def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
-    """Submit a task to the TES endpoint and return the response as a dictionary."""
+def _tes_request(
+    method: str,
+    path: str = "/tasks",
+    **request_kwargs: Any,
+) -> dict[str, Any]:
+    """Send an authenticated request to TES and return its response."""
     tes_url = _get_required_setting("TES_URL").rstrip("/")
     username = _get_required_setting("TES_USERNAME")
     password = _get_required_setting("TES_PASSWORD")
 
     try:
-        response = httpx2.post(
-            f"{tes_url}/tasks",
-            json=payload,
+        response = getattr(httpx2, method)(
+            f"{tes_url}{path}",
             auth=(username, password),
             headers={"Accept": "application/json"},
             timeout=30,
+            **request_kwargs,
         )
         response.raise_for_status()
     except httpx2.HTTPStatusError as error:
@@ -47,7 +52,9 @@ def _submit_task(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         return json.loads(response.text)
     except json.JSONDecodeError:
-        return {"status": "submitted", "response": response.text}
+        if method == "post":
+            return {"status": "submitted", "response": response.text}
+        return {"response": response.text}
 
 
 @mcp.tool()
@@ -104,7 +111,54 @@ async def run_script(
     }
 
     logger.info("Submitting run-script task for %s", output_path)
-    result = await asyncio.to_thread(_submit_task, payload)
+    result = await asyncio.to_thread(_tes_request, "post", json=payload)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def list_tasks() -> str:
+    """Return the full list of tasks from the TES endpoint."""
+    result = await asyncio.to_thread(
+        _tes_request,
+        "get",
+        params={"view": "FULL", "page_size": 100},
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def get_service_info() -> str:
+    """Return service information from the TES endpoint."""
+    result = await asyncio.to_thread(_tes_request, "get", path="/service-info")
+    return json.dumps(result, indent=2)
+
+
+def _task_path(task_id: str, suffix: str = "") -> str:
+    if not task_id.strip():
+        raise ValueError("task_id must not be empty")
+    return f"/tasks/{quote(task_id, safe='')}{suffix}"
+
+
+@mcp.tool()
+async def get_task(task_id: str) -> str:
+    """Return full details for a TES task."""
+    result = await asyncio.to_thread(
+        _tes_request,
+        "get",
+        path=_task_path(task_id),
+        params={"view": "FULL"},
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def cancel_task(task_id: str) -> str:
+    """Cancel a TES task and return the endpoint response."""
+    result = await asyncio.to_thread(
+        _tes_request,
+        "post",
+        path=_task_path(task_id, ":cancel"),
+    )
     return json.dumps(result, indent=2)
 
 
