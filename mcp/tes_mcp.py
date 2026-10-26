@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     tes_password: str = Field(min_length=1)
     output_path: str = Field(min_length=1)
     output_url: AnyUrl
-    output_browse_url: AnyHttpUrl | None = Field(
+    output_browse_url: AnyHttpUrl = Field(
         default="https://minio-kovac-ns.dyn.cloud.e-infra.cz",
         validate_default=True,
     )
@@ -194,25 +194,16 @@ def _make_tes_request(
 
 
 def _get_output_link(output_url: str, session_id: str) -> str:
-    """Return a link to the session's output directory.
+    """Return a console link to the session's output directory.
 
-    OUTPUT_URL is the location handed to TES. When it points at S3 and
-    OUTPUT_BROWSE_URL names an S3 console, build the console's browse URL:
-    {console}/buckets/{bucket}/browse/{base64 of the key without the bucket,
-    ending in a slash}. Otherwise fall back to the OUTPUT_URL itself.
+    OUTPUT_URL is an s3:// URL; its bucket and key prefix are mapped onto the
+    console's browse URL as {console}/buckets/{bucket}/browse/{base64 key}.
     """
-    output_directory_url = output_url.rstrip("/") + "/" + session_id
-    browse_url = settings.output_browse_url
-    if not browse_url or not output_url.startswith("s3://"):
-        return output_directory_url + "/"
-
-    bucket, _, prefix = output_url[len("s3://") :].rstrip("/").partition("/")
-    if not bucket:
-        return output_directory_url + "/"
-
-    key = "/".join(part for part in (prefix, session_id) if part) + "/"
+    bucket, _, prefix = output_url.removeprefix("s3://").rstrip("/").partition("/")
+    key = "/".join(filter(None, (prefix, session_id))) + "/"
     encoded_key = base64.b64encode(key.encode()).decode()
-    return f"{str(browse_url).rstrip('/')}/buckets/{bucket}/browse/{encoded_key}"
+    console_url = str(settings.output_browse_url).rstrip("/")
+    return f"{console_url}/buckets/{bucket}/browse/{encoded_key}"
 
 
 def _get_session_id(ctx: Context, default: str | None = None) -> str | None:
