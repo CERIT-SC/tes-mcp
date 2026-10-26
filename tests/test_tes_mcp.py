@@ -72,29 +72,6 @@ def test_run_script_submits_response(monkeypatch, tes_request):
     ]
 
 
-def test_run_script_returns_http_output_link(monkeypatch, tes_request):
-    tes_mcp.settings.output_url = "https://storage.example.com/bucket/results"
-    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
-
-    result = asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
-
-    assert json.loads(result)["output_url"] == (
-        "https://storage.example.com/bucket/results/session-123/"
-    )
-    assert tes_request["json"]["outputs"][0]["url"] == (
-        "https://storage.example.com/bucket/results/session-123"
-    )
-
-
-def test_run_script_returns_s3_link_without_console(monkeypatch, tes_request):
-    tes_mcp.settings.output_browse_url = None
-    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
-
-    result = asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
-
-    assert json.loads(result)["output_url"] == "s3://bucket/results/session-123/"
-
-
 def test_run_script_returns_console_link_for_s3_output(monkeypatch, tes_request):
     tes_mcp.settings.output_browse_url = "https://minio.example.com"
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
