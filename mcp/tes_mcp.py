@@ -1,6 +1,7 @@
 """MCP server for submitting file-creation tasks to a TES endpoint."""
 
 import asyncio
+import base64
 import json
 import logging
 import uuid
@@ -26,6 +27,10 @@ class Settings(BaseSettings):
     tes_password: str = Field(min_length=1)
     output_path: str = Field(min_length=1)
     output_url: AnyUrl
+    output_browse_url: AnyHttpUrl = Field(
+        default="https://minio-kovac-ns.dyn.cloud.e-infra.cz",
+        validate_default=True,
+    )
     session_id: str | None = None
     session_id_header_key: str = Field(default="MCP-Session-Id", min_length=1)
     executor_image: str = Field(default="ubuntu:20.04", min_length=1)
@@ -41,15 +46,21 @@ async def run_script(
     script: str,
     ctx: Context,
 ) -> str:
-    """Run a shell script remotely and save its standard output.
+    """Run a shell script remotely and save its output directory.
 
     Use this tool whenever the user asks to execute a command or script, or
-    create a file from command output.
+    create files from command output.
 
     The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
-    in the MCP environment file. The script and optional output file name are
-    provided when calling the tool. The script's standard output is saved to the
-    output file.
+    in the MCP environment file. The script runs with OUTPUT_PATH as its working
+    directory, and everything it writes there is uploaded to OUTPUT_URL/<session
+    id> when the task completes.
+
+    The response includes that location as output_url: a clickable link to the
+    session's output directory when OUTPUT_BROWSE_URL is configured, otherwise
+    the s3:// URL itself. Give output_url to the user as the link to the saved
+    files. The task may still be running when this tool returns; use get_task to
+    follow its status.
     """
     output_path = settings.output_path
     output_url = str(settings.output_url)
@@ -58,21 +69,21 @@ async def run_script(
 
     session_id = _get_session_id(ctx) or uuid.uuid4().hex
 
-    output_file_url = output_url.rstrip("/") + "/" + session_id
+    output_directory_url = output_url.rstrip("/") + "/" + session_id
     payload = {
         "name": "run-script",
         "tags": {"MCP-Session-Id": session_id},
         "inputs": [
             {
                 "path": output_path,
-                "url": output_file_url,
+                "url": output_directory_url,
                 "type": "DIRECTORY",
             }
         ],
         "outputs": [
             {
                 "path": output_path,
-                "url": output_file_url,
+                "url": output_directory_url,
                 "type": "DIRECTORY",
             }
         ],
@@ -91,7 +102,13 @@ async def run_script(
 
     logger.info("Submitting run-script task for %s", output_path)
     result = await asyncio.to_thread(_make_tes_request, "post", json=payload)
-    return json.dumps(result, indent=2)
+    return json.dumps(
+        {
+            "task": result,
+            "output_url": _get_output_link(output_url, session_id),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -174,6 +191,19 @@ def _make_tes_request(
         if method == "post":
             return {"status": "submitted", "response": response.text}
         return {"response": response.text}
+
+
+def _get_output_link(output_url: str, session_id: str) -> str:
+    """Return a console link to the session's output directory.
+
+    OUTPUT_URL is an s3:// URL; its bucket and key prefix are mapped onto the
+    console's browse URL as {console}/buckets/{bucket}/browse/{base64 key}.
+    """
+    bucket, _, prefix = output_url.removeprefix("s3://").rstrip("/").partition("/")
+    key = "/".join(filter(None, (prefix, session_id))) + "/"
+    encoded_key = base64.b64encode(key.encode()).decode()
+    console_url = str(settings.output_browse_url).rstrip("/")
+    return f"{console_url}/buckets/{bucket}/browse/{encoded_key}"
 
 
 def _get_session_id(ctx: Context, default: str | None = None) -> str | None:
