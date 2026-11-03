@@ -50,14 +50,7 @@ async def run_script(
     ctx: Context,
     output_file_name: str,
 ) -> str:
-    """Run a shell script remotely and return a temporary file URL.
-
-    Use this tool whenever the user asks to execute a command or script, or
-    create a file from command output. If output_file_name is omitted, a
-    unique filename is generated for the script's standard output and error.
-    Set output_file_name when the script creates a specific file whose URL
-    should be returned.
-    """
+    """Run a shell script and return a temporary URL for its output file."""
     if not script.strip():
         raise ValueError("script must not be empty")
 
