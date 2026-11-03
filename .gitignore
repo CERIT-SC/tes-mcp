@@ -4,4 +4,4 @@
 .venv
 .vscode
 __pycache__
-k8s
+deploy
