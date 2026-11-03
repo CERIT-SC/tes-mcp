@@ -41,6 +41,7 @@ def tes_request(monkeypatch):
         tes_url="https://tes.example.com",
         tes_username="username",
         tes_password="password",
+        output_path="/results",
         output_url="s3://bucket/results",
     )
     monkeypatch.setattr(tes_mcp, "settings", settings)
@@ -75,7 +76,7 @@ def test_run_script_submits_response(monkeypatch, tes_request):
     assert tes_request["path"] == "/tasks"
     assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
     assert tes_request["json"]["outputs"][0] == {
-        "path": "/data",
+        "path": "/results",
         "url": "s3://bucket/results/session-123",
         "type": "DIRECTORY",
     }
@@ -120,7 +121,7 @@ def test_run_script_uses_output_directory(monkeypatch, tes_request):
         tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
     )
 
-    assert tes_request["json"]["inputs"][0]["path"] == "/data"
+    assert tes_request["json"]["inputs"][0]["path"] == "/results"
     assert tes_request["json"]["inputs"][0]["type"] == "DIRECTORY"
 
 
