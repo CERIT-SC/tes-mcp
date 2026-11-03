@@ -1,11 +1,20 @@
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+
+os.environ.setdefault("TES_URL", "https://tes.example.com")
+os.environ.setdefault("TES_USERNAME", "test-user")
+os.environ.setdefault("TES_PASSWORD", "test-password")
+os.environ.setdefault("OUTPUT_URL", "s3://test-bucket/results")
+os.environ.setdefault("S3_ENDPOINT_URL", "https://s3.example.com")
+os.environ.setdefault("S3_ACCESS_KEY_ID", "test-access-key")
+os.environ.setdefault("S3_SECRET_ACCESS_KEY", "test-secret-key")
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "mcp"))
 
@@ -19,7 +28,6 @@ def test_settings_rejects_invalid_tes_url():
             tes_url="not-a-url",
             tes_username="username",
             tes_password="password",
-            output_path="/results",
             output_url="s3://bucket/results",
             s3_access_key_id="access-key",
             s3_secret_access_key="secret-key",
@@ -33,7 +41,6 @@ def tes_request(monkeypatch):
         tes_url="https://tes.example.com",
         tes_username="username",
         tes_password="password",
-        output_path="/results",
         output_url="s3://bucket/results",
     )
     monkeypatch.setattr(tes_mcp, "settings", settings)
@@ -54,7 +61,9 @@ def test_run_script_submits_response(monkeypatch, tes_request):
         lambda key: f"https://s3.example/{key}",
     )
 
-    result = asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+    result = asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
 
     assert json.loads(result) == {
         "task": {"id": "task-123"},
@@ -66,30 +75,61 @@ def test_run_script_submits_response(monkeypatch, tes_request):
     assert tes_request["path"] == "/tasks"
     assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
     assert tes_request["json"]["outputs"][0] == {
-        "path": "/results",
+        "path": "/data",
         "url": "s3://bucket/results/session-123",
         "type": "DIRECTORY",
     }
     assert tes_request["json"]["executors"][0]["command"] == [
         "/bin/sh",
         "-c",
-        "{ echo 2\n} > /results/output.txt 2>&1",
+        "echo 2",
     ]
 
 
-def test_run_script_uses_configured_output_directory(monkeypatch, tes_request):
+def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+    monkeypatch.setattr(
+        tes_mcp,
+        "_generate_presigned_url",
+        lambda key: f"https://s3.example/{key}",
+    )
+
+    result = asyncio.run(
+        tes_mcp.run_script(
+            "echo 2 > text.txt", ctx=context, output_file_name="text.txt"
+        )
+    )
+
+    assert json.loads(result) == {
+        "task": {"id": "task-123"},
+        "output_url": "https://s3.example/results/session-123/text.txt",
+        "output_object_key": "results/session-123/text.txt",
+        "expires_in": 3600,
+    }
+    assert tes_request["json"]["executors"][0]["command"] == [
+        "/bin/sh",
+        "-c",
+        "echo 2 > text.txt",
+    ]
+
+
+def test_run_script_uses_output_directory(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
-    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
 
-    assert tes_request["json"]["inputs"][0]["path"] == "/results"
+    assert tes_request["json"]["inputs"][0]["path"] == "/data"
     assert tes_request["json"]["inputs"][0]["type"] == "DIRECTORY"
 
 
 def test_run_script_uses_session_id_from_context(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})
 
-    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
 
     assert tes_request["json"]["outputs"][0]["url"] == (
         "s3://bucket/results/request-session"
@@ -100,7 +140,9 @@ def test_run_script_uses_configured_session_id_over_context(monkeypatch, tes_req
     tes_mcp.settings.session_id = "configured-session"
     context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})
 
-    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
 
     assert tes_request["json"]["outputs"][0]["url"] == (
         "s3://bucket/results/configured-session"
@@ -111,7 +153,9 @@ def test_run_script_uses_configured_session_header(monkeypatch, tes_request):
     tes_mcp.settings.session_id_header_key = "X-Session-Id"
     context = SimpleNamespace(headers={"X-Session-Id": "custom-session"})
 
-    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
 
     assert tes_request["json"]["outputs"][0]["url"] == (
         "s3://bucket/results/custom-session"
@@ -122,7 +166,9 @@ def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
     tes_mcp.settings.executor_image = "python:3.12"
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
-    asyncio.run(tes_mcp.run_script("echo 2", ctx=context))
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
 
     assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
 
