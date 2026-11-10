@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import posixpath
+import re
 import uuid
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -56,7 +57,7 @@ async def run_script(
 
     session_id = _get_session_id(ctx) or uuid.uuid4().hex
 
-    output_file_url = str(settings.output_url).rstrip("/") + "/" + session_id
+    output_file_url = _get_session_output_url(session_id)
     payload = {
         "name": "run-script",
         "tags": {"MCP-Session-Id": session_id},
@@ -143,6 +144,62 @@ async def get_presigned_url(object_key: str, ctx: Context) -> str:
 
 
 @mcp.tool()
+async def get_session_files_presigned_url(ctx: Context) -> str:
+    """Create a tarball of all session files through TES and return its URL."""
+    if session_id := _get_session_id(ctx):
+        archive_name = "session-files.tar.gz"
+        archive_output_path = "/archive"
+        source_path = settings.output_path
+        payload = {
+            "name": "tar-session-files",
+            "tags": {"MCP-Session-Id": session_id},
+            "inputs": [
+                {
+                    "path": source_path,
+                    "url": _get_session_output_url(session_id),
+                    "type": "DIRECTORY",
+                }
+            ],
+            "outputs": [
+                {
+                    "path": archive_output_path,
+                    "url": _get_session_output_url(session_id),
+                    "type": "DIRECTORY",
+                }
+            ],
+            "executors": [
+                {
+                    "image": settings.executor_image,
+                    "workdir": source_path,
+                    "command": [
+                        "/bin/sh",
+                        "-c",
+                        f"tar --exclude=./{archive_name} -czf {archive_output_path}/{archive_name} -C {source_path} .",
+                    ],
+                }
+            ],
+        }
+        task = await asyncio.to_thread(_make_tes_request, "post", json=payload)
+        archive_object_key = _get_output_object_key(session_id, archive_name)
+        archive_url = await asyncio.to_thread(
+            _generate_presigned_url,
+            archive_object_key,
+        )
+        return json.dumps(
+            {
+                "task": task,
+                "url": archive_url,
+                "object_key": archive_object_key,
+                "expires_in": settings.presigned_url_expiration,
+            },
+            indent=2,
+        )
+    raise ValueError(
+        "Session ID is missing. Cannot create a session archive without a session ID."
+    )
+
+
+@mcp.tool()
 async def get_service_info() -> str:
     """Return information about the remote execution service."""
     result = await asyncio.to_thread(_make_tes_request, "get", path="/service-info")
@@ -207,11 +264,18 @@ def _make_tes_request(
 
 
 def _get_session_id(ctx: Context, default: str | None = None) -> str | None:
-    """Return the configured session ID, or the one supplied by the request."""
-    if settings.session_id:
-        return settings.session_id
-    session_id = (ctx.headers or {}).get(settings.session_id_header_key)
-    return session_id or default
+    """Return the validated session ID, or the one supplied by the request."""
+    session_id = settings.session_id or (ctx.headers or {}).get(
+        settings.session_id_header_key
+    )
+    session_id = session_id or default
+    if session_id is None:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise ValueError(
+            "session_id must contain only letters, digits, underscores, and hyphens"
+        )
+    return session_id
 
 
 def _get_task_path(task_id: str, suffix: str = "") -> str:
@@ -233,6 +297,11 @@ def _get_session_id_prefix(session_id: str) -> str:
     """Return the configured S3 output prefix for a session."""
     prefix = urlsplit(str(settings.output_url)).path.strip("/")
     return posixpath.join(prefix, session_id)
+
+
+def _get_session_output_url(session_id: str) -> str:
+    """Return the S3 URL for a session's output directory."""
+    return str(settings.output_url).rstrip("/") + "/" + session_id
 
 
 def _get_output_bucket() -> str:

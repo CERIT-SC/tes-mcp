@@ -216,6 +216,80 @@ def test_get_presigned_url_rejects_path_traversal(tes_request):
         asyncio.run(tes_mcp.get_presigned_url("../secret.txt", ctx=context))
 
 
+def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+    monkeypatch.setattr(
+        tes_mcp,
+        "_generate_presigned_url",
+        lambda key: f"https://s3.example/{key}",
+    )
+
+    result = asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+    assert json.loads(result) == {
+        "task": {"id": "task-123"},
+        "url": "https://s3.example/results/session-123/session-files.tar.gz",
+        "object_key": "results/session-123/session-files.tar.gz",
+        "expires_in": 3600,
+    }
+    assert tes_request["method"] == "post"
+    assert tes_request["json"]["name"] == "tar-session-files"
+    assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
+    assert tes_request["json"]["inputs"][0] == {
+        "path": "/results",
+        "url": "s3://bucket/results/session-123",
+        "type": "DIRECTORY",
+    }
+    assert tes_request["json"]["outputs"][0] == {
+        "path": "/archive",
+        "url": "s3://bucket/results/session-123",
+        "type": "DIRECTORY",
+    }
+    assert tes_request["json"]["executors"][0]["image"] == "ubuntu:20.04"
+    assert tes_request["json"]["executors"][0]["command"] == [
+        "/bin/sh",
+        "-c",
+        "tar --exclude=./session-files.tar.gz -czf /archive/session-files.tar.gz -C /results .",
+    ]
+
+
+def test_get_session_files_presigned_url_uses_configured_executor_image(
+    monkeypatch, tes_request
+):
+    tes_mcp.settings.executor_image = "python:3.12"
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+    assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
+
+
+@pytest.mark.parametrize(
+    "session_id", ["session;id", "session $(id)", "../escape", "session id"]
+)
+def test_get_session_files_presigned_url_rejects_invalid_session_id(
+    tes_request, session_id
+):
+    context = SimpleNamespace(headers={"MCP-Session-Id": session_id})
+
+    with pytest.raises(ValueError, match="session_id must contain only"):
+        asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+    assert tes_request == {}
+
+
+def test_get_session_files_presigned_url_rejects_missing_session(tes_request):
+    context = SimpleNamespace(headers=None)
+
+    with pytest.raises(
+        ValueError,
+        match="Session ID is missing. Cannot create a session archive without a session ID.",
+    ):
+        asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+    assert tes_request == {}
+
+
 def test_list_tasks_uses_configured_session_id(monkeypatch, tes_request):
     tes_mcp.settings.session_id = "configured-session"
     context = SimpleNamespace(headers={"MCP-Session-Id": "request-session"})

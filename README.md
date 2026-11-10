@@ -7,3 +7,4 @@ TES (Task Execution Service) as an MCP tool, enabling users to execute scripts i
 - Retrieve detailed information about individual TES tasks, including status and execution metadata.
 - Cancel running TES tasks when they are no longer needed.
 - Generate presigned URLs for known files in a session.
+- Create a `.tar.gz` archive of all session files through TES and generate a presigned URL.
