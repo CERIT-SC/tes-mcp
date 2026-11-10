@@ -149,7 +149,10 @@ async def get_presigned_url(object_key: str, ctx: Context) -> str:
 
 @mcp.tool()
 async def get_session_files_presigned_url(ctx: Context) -> str:
-    """Create a tarball of all session files through TES and return its URL."""
+    """Get a download URL for all session files.
+
+    Everything is handled in one call; no extra tasks or verification needed.
+    """
     if session_id := _get_session_id(ctx):
         archive_name = "session-files.tar.gz"
         archive_output_path = "/archive"
