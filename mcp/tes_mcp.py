@@ -3,11 +3,15 @@
 import asyncio
 import json
 import logging
+import posixpath
+import re
 import uuid
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
+import boto3  # type: ignore[import-untyped]
 import httpx2
+from botocore.config import Config  # type: ignore[import-untyped]
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 from pydantic import AnyHttpUrl, AnyUrl, Field
@@ -24,8 +28,13 @@ class Settings(BaseSettings):
     tes_url: AnyHttpUrl
     tes_username: str = Field(min_length=1)
     tes_password: str = Field(min_length=1)
-    output_path: str = Field(min_length=1)
+    output_path: str = Field(default="/data", min_length=1)
     output_url: AnyUrl
+    s3_endpoint_url: AnyHttpUrl = Field(min_length=1)
+    s3_access_key_id: str = Field(min_length=1)
+    s3_secret_access_key: str = Field(min_length=1)
+    s3_region: str = Field(default="us-east-1", min_length=1)
+    presigned_url_expiration: int = Field(default=3600, gt=0, le=604800)
     session_id: str | None = None
     session_id_header_key: str = Field(default="MCP-Session-Id", min_length=1)
     executor_image: str = Field(default="ubuntu:20.04", min_length=1)
@@ -40,38 +49,32 @@ settings = Settings()  # type: ignore[call-arg]
 async def run_script(
     script: str,
     ctx: Context,
+    output_file_name: str,
 ) -> str:
-    """Run a shell script remotely and save its standard output.
+    """Run a shell script and return a temporary URL for its output file.
 
-    Use this tool whenever the user asks to execute a command or script, or
-    create a file from command output.
-
-    The output directory and URL are configured through OUTPUT_PATH and OUTPUT_URL
-    in the MCP environment file. The script and optional output file name are
-    provided when calling the tool. The script's standard output is saved to the
-    output file.
+    Scripts run asynchronously; do not use sleep or wait commands.
+    Sleeping only keeps containers alive without any effect.
     """
-    output_path = settings.output_path
-    output_url = str(settings.output_url)
     if not script.strip():
         raise ValueError("script must not be empty")
 
     session_id = _get_session_id(ctx) or uuid.uuid4().hex
 
-    output_file_url = output_url.rstrip("/") + "/" + session_id
+    output_file_url = _get_session_output_url(session_id)
     payload = {
         "name": "run-script",
         "tags": {"MCP-Session-Id": session_id},
         "inputs": [
             {
-                "path": output_path,
+                "path": settings.output_path,
                 "url": output_file_url,
                 "type": "DIRECTORY",
             }
         ],
         "outputs": [
             {
-                "path": output_path,
+                "path": settings.output_path,
                 "url": output_file_url,
                 "type": "DIRECTORY",
             }
@@ -79,19 +82,32 @@ async def run_script(
         "executors": [
             {
                 "image": settings.executor_image,
-                "workdir": output_path,
+                "workdir": settings.output_path,
                 "command": [
                     "/bin/sh",
                     "-c",
-                    f"{script}",
+                    script,
                 ],
             }
         ],
     }
 
-    logger.info("Submitting run-script task for %s", output_path)
+    logger.info("Submitting run-script task for %s", settings.output_path)
     result = await asyncio.to_thread(_make_tes_request, "post", json=payload)
-    return json.dumps(result, indent=2)
+    output_object_key = _get_output_object_key(session_id, output_file_name)
+    output_presigned_url = await asyncio.to_thread(
+        _generate_presigned_url,
+        output_object_key,
+    )
+    return json.dumps(
+        {
+            "task": result,
+            "output_url": output_presigned_url,
+            "output_object_key": output_object_key,
+            "expires_in": settings.presigned_url_expiration,
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -110,6 +126,84 @@ async def list_tasks(ctx: Context) -> str:
         )
         return json.dumps(result, indent=2)
     raise ValueError("Session ID is missing. Cannot list tasks without a session ID.")
+
+
+@mcp.tool()
+async def get_presigned_url(object_key: str, ctx: Context) -> str:
+    """Return a temporary GET URL for an object in this session's output directory."""
+    if session_id := _get_session_id(ctx):
+        key = _get_output_object_key(session_id, object_key)
+        url = await asyncio.to_thread(_generate_presigned_url, key)
+        return json.dumps(
+            {
+                "url": url,
+                "object_key": key,
+                "expires_in": settings.presigned_url_expiration,
+            },
+            indent=2,
+        )
+    raise ValueError(
+        "Session ID is missing. Cannot create a presigned URL without a session ID."
+    )
+
+
+@mcp.tool()
+async def get_session_files_presigned_url(ctx: Context) -> str:
+    """Get a download URL for all session files.
+
+    Everything is handled in one call; no extra tasks or verification needed.
+    """
+    if session_id := _get_session_id(ctx):
+        archive_name = f"session-files_{session_id}.tar.gz"
+        archive_output_path = "/archive"
+        source_path = settings.output_path
+        payload = {
+            "name": "tar-session-files",
+            "tags": {"MCP-Session-Id": session_id},
+            "inputs": [
+                {
+                    "path": source_path,
+                    "url": _get_session_output_url(session_id),
+                    "type": "DIRECTORY",
+                }
+            ],
+            "outputs": [
+                {
+                    "path": archive_output_path,
+                    "url": _get_session_output_url(session_id),
+                    "type": "DIRECTORY",
+                }
+            ],
+            "executors": [
+                {
+                    "image": settings.executor_image,
+                    "workdir": source_path,
+                    "command": [
+                        "/bin/sh",
+                        "-c",
+                        f"tar --exclude=./{archive_name} -czf {archive_output_path}/{archive_name} -C {source_path} .",
+                    ],
+                }
+            ],
+        }
+        task = await asyncio.to_thread(_make_tes_request, "post", json=payload)
+        archive_object_key = _get_output_object_key(session_id, archive_name)
+        archive_url = await asyncio.to_thread(
+            _generate_presigned_url,
+            archive_object_key,
+        )
+        return json.dumps(
+            {
+                "task": task,
+                "url": archive_url,
+                "object_key": archive_object_key,
+                "expires_in": settings.presigned_url_expiration,
+            },
+            indent=2,
+        )
+    raise ValueError(
+        "Session ID is missing. Cannot create a session archive without a session ID."
+    )
 
 
 @mcp.tool()
@@ -177,11 +271,18 @@ def _make_tes_request(
 
 
 def _get_session_id(ctx: Context, default: str | None = None) -> str | None:
-    """Return the configured session ID, or the one supplied by the request."""
-    if settings.session_id:
-        return settings.session_id
-    session_id = (ctx.headers or {}).get(settings.session_id_header_key)
-    return session_id or default
+    """Return the validated session ID, or the one supplied by the request."""
+    session_id = settings.session_id or (ctx.headers or {}).get(
+        settings.session_id_header_key
+    )
+    session_id = session_id or default
+    if session_id is None:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise ValueError(
+            "session_id must contain only letters, digits, underscores, and hyphens"
+        )
+    return session_id
 
 
 def _get_task_path(task_id: str, suffix: str = "") -> str:
@@ -189,6 +290,49 @@ def _get_task_path(task_id: str, suffix: str = "") -> str:
     if not task_id.strip():
         raise ValueError("task_id must not be empty")
     return f"/tasks/{quote(task_id, safe='')}{suffix}"
+
+
+def _get_output_object_key(session_id: str, object_key: str) -> str:
+    """Return a safe object key below the session's output directory."""
+    object_key = object_key.strip("/")
+    if not object_key or any(part in {"", ".", ".."} for part in object_key.split("/")):
+        raise ValueError("object_key must be a non-empty relative object key")
+    return posixpath.join(_get_session_id_prefix(session_id), object_key)
+
+
+def _get_session_id_prefix(session_id: str) -> str:
+    """Return the configured S3 output prefix for a session."""
+    prefix = urlsplit(str(settings.output_url)).path.strip("/")
+    return posixpath.join(prefix, session_id)
+
+
+def _get_session_output_url(session_id: str) -> str:
+    """Return the S3 URL for a session's output directory."""
+    return str(settings.output_url).rstrip("/") + "/" + session_id
+
+
+def _get_output_bucket() -> str:
+    """Return the S3 bucket from the configured output URL."""
+    if bucket := urlsplit(str(settings.output_url)).netloc:
+        return bucket
+    raise ValueError("OUTPUT_URL must include an S3 bucket")
+
+
+def _generate_presigned_url(key: str) -> str:
+    """Generate a temporary read URL for an S3 object."""
+    client = boto3.client(
+        "s3",
+        endpoint_url=str(settings.s3_endpoint_url),
+        aws_access_key_id=settings.s3_access_key_id,
+        aws_secret_access_key=settings.s3_secret_access_key,
+        region_name=settings.s3_region,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": _get_output_bucket(), "Key": key},
+        ExpiresIn=settings.presigned_url_expiration,
+    )
 
 
 if __name__ == "__main__":
