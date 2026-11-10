@@ -51,7 +51,11 @@ async def run_script(
     ctx: Context,
     output_file_name: str,
 ) -> str:
-    """Run a shell script and return a temporary URL for its output file."""
+    """Run a shell script and return a temporary URL for its output file.
+
+    Scripts run asynchronously; do not use sleep or wait commands.
+    Sleeping only keeps containers alive without any effect.
+    """
     if not script.strip():
         raise ValueError("script must not be empty")
 
