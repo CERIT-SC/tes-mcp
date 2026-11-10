@@ -154,7 +154,7 @@ async def get_session_files_presigned_url(ctx: Context) -> str:
     Everything is handled in one call; no extra tasks or verification needed.
     """
     if session_id := _get_session_id(ctx):
-        archive_name = "session-files.tar.gz"
+        archive_name = f"session-files_{session_id}.tar.gz"
         archive_output_path = "/archive"
         source_path = settings.output_path
         payload = {

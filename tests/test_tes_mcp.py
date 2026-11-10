@@ -228,8 +228,8 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
 
     assert json.loads(result) == {
         "task": {"id": "task-123"},
-        "url": "https://s3.example/results/session-123/session-files.tar.gz",
-        "object_key": "results/session-123/session-files.tar.gz",
+        "url": "https://s3.example/results/session-123/session-files_session-123.tar.gz",
+        "object_key": "results/session-123/session-files_session-123.tar.gz",
         "expires_in": 3600,
     }
     assert tes_request["method"] == "post"
@@ -249,7 +249,7 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
     assert tes_request["json"]["executors"][0]["command"] == [
         "/bin/sh",
         "-c",
-        "tar --exclude=./session-files.tar.gz -czf /archive/session-files.tar.gz -C /results .",
+        "tar --exclude=./session-files_session-123.tar.gz -czf /archive/session-files_session-123.tar.gz -C /results .",
     ]
 
 
