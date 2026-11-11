@@ -34,7 +34,7 @@ s3:
 outputUrl: s3://tes/data
 s3Region: us-east-1
 presignedUrlExpiration: "3600"
-executorImage: ubuntu:20.04
+executorImage: cerit.io/robindurnik/mcp-tes-executor:latest
 
 resources:
   requests:
