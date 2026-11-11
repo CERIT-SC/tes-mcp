@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tes-mcp.fullname" . }}
+  labels:
+{{ include "tes-mcp.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "tes-mcp.selectorLabels" . | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "tes-mcp.selectorLabels" . | indent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroupChangePolicy: OnRootMismatch
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tes-mcp
+          image: {{ include "tes-mcp.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: TES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tes-mcp.fullname" . }}
+                  key: TES_URL
+            - name: TES_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tes-mcp.fullname" . }}
+                  key: TES_USERNAME
+            - name: TES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tes-mcp.fullname" . }}
+                  key: TES_PASSWORD
+            - name: OUTPUT_URL
+              value: {{ .Values.outputUrl | quote }}
+            - name: S3_ENDPOINT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tes-mcp.fullname" . }}
+                  key: S3_ENDPOINT_URL
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tes-mcp.fullname" . }}
+                  key: S3_ACCESS_KEY_ID
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tes-mcp.fullname" . }}
+                  key: S3_SECRET_ACCESS_KEY
+            - name: S3_REGION
+              value: {{ .Values.s3Region | quote }}
+            - name: PRESIGNED_URL_EXPIRATION
+              value: {{ .Values.presignedUrlExpiration | quote }}
+            - name: EXECUTOR_IMAGE
+              value: {{ .Values.executorImage | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,37 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tes-mcp.fullname" . }}
+  labels:
+{{ include "tes-mcp.labels" . | indent 4 }}
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: kube-system
+      sectionName: websecure
+  hostnames:
+    - {{ include "tes-mcp.host" . }}
+  rules:
+    - backendRefs:
+        - name: {{ include "tes-mcp.fullname" . }}
+          port: {{ .Values.service.port }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tes-mcp.fullname" . }}-redirect
+  labels:
+{{ include "tes-mcp.labels" . | indent 4 }}
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: kube-system
+      sectionName: web
+  hostnames:
+    - {{ include "tes-mcp.host" . }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301

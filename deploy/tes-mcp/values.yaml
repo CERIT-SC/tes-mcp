@@ -1,0 +1,48 @@
+# Default values for the tes-mcp chart.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Reference by digest for reproducible rollouts.
+  repository: cerit.io/robindurnik/mcp-tes
+  tag: latest
+  digest: ""        # e.g. sha256:abc123... — set to pin; overrides tag
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+host: tes-mcp-durnik1-ns   # short host → <host>.<namespace>.dyn.cloud.e-infra.cz; FQDN used verbatim
+
+service:
+  port: 8001
+
+# Credentials and endpoint settings for TES and S3. The chart fails to render
+# when any of these is empty. Fill them in via --set, a values file, or --set-string.
+tes:
+  url: ""           # required
+  username: ""      # required
+  password: ""      # required
+
+s3:
+  endpointUrl: ""   # required
+  accessKeyId: ""   # required
+  secretAccessKey: ""  # required
+
+outputUrl: s3://tes/data
+s3Region: us-east-1
+presignedUrlExpiration: "3600"
+executorImage: ubuntu:20.04
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "1"
+    memory: "512Mi"
+
+networkPolicy:
+  enabled: true
