@@ -43,6 +43,9 @@ class Settings(BaseSettings):
 logger = logging.getLogger(__name__)
 mcp = MCPServer("tes")
 settings = Settings()  # type: ignore[call-arg]
+_TERMINAL_TASK_STATES = frozenset(
+    {"COMPLETE", "EXECUTOR_ERROR", "SYSTEM_ERROR", "CANCELED"}
+)
 
 
 @mcp.tool()
@@ -226,6 +229,32 @@ async def get_task(task_id: str) -> str:
 
 
 @mcp.tool()
+async def sleep(seconds: float) -> str:
+    """Wait for the requested number of seconds before returning."""
+    if seconds < 0:
+        raise ValueError("seconds must not be negative")
+
+    await asyncio.sleep(seconds)
+    return json.dumps({"status": "ok", "slept_seconds": seconds}, indent=2)
+
+
+@mcp.tool()
+async def wait_for_task_finish(task_id: str) -> str:
+    """Wait until a submitted task reaches a terminal state."""
+    task_path = _get_task_path(task_id)
+    while True:
+        result = await asyncio.to_thread(
+            _make_tes_request,
+            "get",
+            path=task_path,
+            params={"view": "FULL"},
+        )
+        if _is_task_finished(result):
+            return json.dumps(result, indent=2)
+        await asyncio.sleep(1)
+
+
+@mcp.tool()
 async def cancel_task(task_id: str) -> str:
     """Cancel a submitted remote execution task."""
     result = await asyncio.to_thread(
@@ -290,6 +319,12 @@ def _get_task_path(task_id: str, suffix: str = "") -> str:
     if not task_id.strip():
         raise ValueError("task_id must not be empty")
     return f"/tasks/{quote(task_id, safe='')}{suffix}"
+
+
+def _is_task_finished(task: dict[str, Any]) -> bool:
+    """Return whether a TES task has reached a terminal state."""
+    state = task.get("state") or task.get("status")
+    return isinstance(state, str) and state.upper() in _TERMINAL_TASK_STATES
 
 
 def _get_output_object_key(session_id: str, object_key: str) -> str:

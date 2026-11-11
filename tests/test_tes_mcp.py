@@ -329,6 +329,68 @@ def test_get_task_encodes_task_id(monkeypatch, tes_request):
     }
 
 
+def test_sleep_waits_and_returns_success(monkeypatch):
+    waited = []
+
+    async def fake_sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(tes_mcp.sleep(2.5))
+
+    assert waited == [2.5]
+    assert json.loads(result) == {"status": "ok", "slept_seconds": 2.5}
+
+
+def test_sleep_rejects_negative_seconds():
+    with pytest.raises(ValueError, match="seconds must not be negative"):
+        asyncio.run(tes_mcp.sleep(-1))
+
+
+def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):
+    responses = iter(
+        [
+            {"id": "task-123", "state": "RUNNING"},
+            {"id": "task-123", "state": "COMPLETE"},
+        ]
+    )
+    waits = []
+
+    def fake_tes_request(method, path="/tasks", **kwargs):
+        request = {"method": method, "path": path, **kwargs}
+        tes_request.setdefault("calls", []).append(request)
+        return next(responses)
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(tes_mcp, "_make_tes_request", fake_tes_request)
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(tes_mcp.wait_for_task_finish("task-123"))
+
+    assert json.loads(result) == {"id": "task-123", "state": "COMPLETE"}
+    assert tes_request["calls"] == [
+        {
+            "method": "get",
+            "path": "/tasks/task-123",
+            "params": {"view": "FULL"},
+        },
+        {
+            "method": "get",
+            "path": "/tasks/task-123",
+            "params": {"view": "FULL"},
+        },
+    ]
+    assert waits == [1]
+
+
+def test_wait_for_task_finish_rejects_empty_id():
+    with pytest.raises(ValueError, match="task_id must not be empty"):
+        asyncio.run(tes_mcp.wait_for_task_finish("  "))
+
+
 def test_cancel_task_uses_cancel_endpoint(monkeypatch, tes_request):
     result = asyncio.run(tes_mcp.cancel_task("task-123"))
 
