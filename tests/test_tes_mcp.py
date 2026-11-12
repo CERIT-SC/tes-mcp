@@ -343,9 +343,27 @@ def test_sleep_waits_and_returns_success(monkeypatch):
     assert json.loads(result) == {"status": "ok", "slept_seconds": 2.5}
 
 
+def test_sleep_allows_maximum_seconds(monkeypatch):
+    waited = []
+
+    async def fake_sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(tes_mcp.sleep(300))
+
+    assert waited == [300]
+
+
 def test_sleep_rejects_negative_seconds():
     with pytest.raises(ValueError, match="seconds must not be negative"):
         asyncio.run(tes_mcp.sleep(-1))
+
+
+def test_sleep_rejects_seconds_above_maximum():
+    with pytest.raises(ValueError, match="seconds must not exceed 300"):
+        asyncio.run(tes_mcp.sleep(300.1))
 
 
 def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):

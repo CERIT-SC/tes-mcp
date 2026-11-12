@@ -46,6 +46,7 @@ settings = Settings()  # type: ignore[call-arg]
 _TERMINAL_TASK_STATES = frozenset(
     {"COMPLETE", "EXECUTOR_ERROR", "SYSTEM_ERROR", "CANCELED"}
 )
+_MAX_SLEEP_SECONDS = 300
 
 
 @mcp.tool()
@@ -230,9 +231,11 @@ async def get_task(task_id: str) -> str:
 
 @mcp.tool()
 async def sleep(seconds: float) -> str:
-    """Wait for the requested number of seconds before returning."""
+    """Wait for up to 300 seconds before returning."""
     if seconds < 0:
         raise ValueError("seconds must not be negative")
+    if seconds > _MAX_SLEEP_SECONDS:
+        raise ValueError("seconds must not exceed 300")
 
     await asyncio.sleep(seconds)
     return json.dumps({"status": "ok", "slept_seconds": seconds}, indent=2)
