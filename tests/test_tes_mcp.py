@@ -199,6 +199,7 @@ def test_get_presigned_url_for_session_object(monkeypatch, tes_request):
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
 
     result = asyncio.run(tes_mcp.get_presigned_url("result.txt", ctx=context))
 
@@ -216,6 +217,63 @@ def test_get_presigned_url_rejects_path_traversal(tes_request):
         asyncio.run(tes_mcp.get_presigned_url("../secret.txt", ctx=context))
 
 
+def test_get_presigned_url_rejects_missing_object(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    def reject_object(key):
+        raise FileNotFoundError(f"S3 object does not exist: {key}")
+
+    monkeypatch.setattr(
+        tes_mcp,
+        "_ensure_object_exists",
+        reject_object,
+    )
+
+    with pytest.raises(FileNotFoundError, match="S3 object does not exist"):
+        asyncio.run(tes_mcp.get_presigned_url("missing.txt", ctx=context))
+
+
+def test_ensure_object_exists_checks_bucket_and_key(monkeypatch, tes_request):
+    calls = []
+
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    tes_mcp._ensure_object_exists("results/session-123/result.txt")
+
+    assert calls == [
+        {
+            "Bucket": "bucket",
+            "Key": "results/session-123/result.txt",
+        }
+    ]
+
+
+def test_ensure_object_exists_reports_missing_object(monkeypatch, tes_request):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            raise tes_mcp.ClientError(
+                {
+                    "Error": {
+                        "Code": "404",
+                        "Message": "Not Found",
+                    }
+                },
+                "HeadObject",
+            )
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="S3 object does not exist: results/session-123/missing.txt",
+    ):
+        tes_mcp._ensure_object_exists("results/session-123/missing.txt")
+
+
 def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
     monkeypatch.setattr(
@@ -223,15 +281,23 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
+    calls = []
+
+    async def fake_wait_for_task_finish(task_id):
+        calls.append(task_id)
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
 
     result = asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
 
     assert json.loads(result) == {
-        "task": {"id": "task-123"},
         "url": "https://s3.example/results/session-123/session-files_session-123.tar.gz",
         "object_key": "results/session-123/session-files_session-123.tar.gz",
         "expires_in": 3600,
     }
+    assert calls == ["task-123"]
     assert tes_request["method"] == "post"
     assert tes_request["json"]["name"] == "tar-session-files"
     assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
@@ -258,6 +324,13 @@ def test_get_session_files_presigned_url_uses_configured_executor_image(
 ):
     tes_mcp.settings.executor_image = "python:3.12"
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
+
+    async def fake_wait_for_task_finish(task_id):
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
 
     asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
 
@@ -327,6 +400,86 @@ def test_get_task_encodes_task_id(monkeypatch, tes_request):
         "path": "/tasks/task%2Fwith%20spaces",
         "params": {"view": "FULL"},
     }
+
+
+def test_sleep_waits_and_returns_success(monkeypatch):
+    waited = []
+
+    async def fake_sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(tes_mcp.sleep(2.5))
+
+    assert waited == [2.5]
+    assert json.loads(result) == {"status": "ok", "slept_seconds": 2.5}
+
+
+def test_sleep_allows_maximum_seconds(monkeypatch):
+    waited = []
+
+    async def fake_sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(tes_mcp.sleep(300))
+
+    assert waited == [300]
+
+
+def test_sleep_rejects_negative_seconds():
+    with pytest.raises(ValueError, match="seconds must not be negative"):
+        asyncio.run(tes_mcp.sleep(-1))
+
+
+def test_sleep_rejects_seconds_above_maximum():
+    with pytest.raises(ValueError, match="seconds must not exceed 300"):
+        asyncio.run(tes_mcp.sleep(300.1))
+
+
+def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):
+    responses = iter(
+        [
+            {"id": "task-123", "state": "RUNNING"},
+            {"id": "task-123", "state": "COMPLETE"},
+        ]
+    )
+    waits = []
+
+    def fake_tes_request(method, path="/tasks", **kwargs):
+        request = {"method": method, "path": path, **kwargs}
+        tes_request.setdefault("calls", []).append(request)
+        return next(responses)
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(tes_mcp, "_make_tes_request", fake_tes_request)
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(tes_mcp.wait_for_task_finish("task-123"))
+
+    assert json.loads(result) == {"id": "task-123", "state": "COMPLETE"}
+    assert tes_request["calls"] == [
+        {
+            "method": "get",
+            "path": "/tasks/task-123",
+            "params": {"view": "FULL"},
+        },
+        {
+            "method": "get",
+            "path": "/tasks/task-123",
+            "params": {"view": "FULL"},
+        },
+    ]
+    assert waits == [1]
+
+
+def test_wait_for_task_finish_rejects_empty_id():
+    with pytest.raises(ValueError, match="task_id must not be empty"):
+        asyncio.run(tes_mcp.wait_for_task_finish("  "))
 
 
 def test_cancel_task_uses_cancel_endpoint(monkeypatch, tes_request):
