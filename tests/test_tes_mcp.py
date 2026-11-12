@@ -223,15 +223,22 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    calls = []
+
+    async def fake_wait_for_task_finish(task_id):
+        calls.append(task_id)
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
 
     result = asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
 
     assert json.loads(result) == {
-        "task": {"id": "task-123"},
         "url": "https://s3.example/results/session-123/session-files_session-123.tar.gz",
         "object_key": "results/session-123/session-files_session-123.tar.gz",
         "expires_in": 3600,
     }
+    assert calls == ["task-123"]
     assert tes_request["method"] == "post"
     assert tes_request["json"]["name"] == "tar-session-files"
     assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
@@ -258,6 +265,11 @@ def test_get_session_files_presigned_url_uses_configured_executor_image(
 ):
     tes_mcp.settings.executor_image = "python:3.12"
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    async def fake_wait_for_task_finish(task_id):
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
 
     asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
 

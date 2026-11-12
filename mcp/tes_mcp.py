@@ -191,6 +191,7 @@ async def get_session_files_presigned_url(ctx: Context) -> str:
             ],
         }
         task = await asyncio.to_thread(_make_tes_request, "post", json=payload)
+        await wait_for_task_finish(task["id"])
         archive_object_key = _get_output_object_key(session_id, archive_name)
         archive_url = await asyncio.to_thread(
             _generate_presigned_url,
@@ -198,7 +199,6 @@ async def get_session_files_presigned_url(ctx: Context) -> str:
         )
         return json.dumps(
             {
-                "task": task,
                 "url": archive_url,
                 "object_key": archive_object_key,
                 "expires_in": settings.presigned_url_expiration,
