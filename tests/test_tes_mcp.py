@@ -199,6 +199,7 @@ def test_get_presigned_url_for_session_object(monkeypatch, tes_request):
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
 
     result = asyncio.run(tes_mcp.get_presigned_url("result.txt", ctx=context))
 
@@ -216,6 +217,63 @@ def test_get_presigned_url_rejects_path_traversal(tes_request):
         asyncio.run(tes_mcp.get_presigned_url("../secret.txt", ctx=context))
 
 
+def test_get_presigned_url_rejects_missing_object(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    def reject_object(key):
+        raise FileNotFoundError(f"S3 object does not exist: {key}")
+
+    monkeypatch.setattr(
+        tes_mcp,
+        "_ensure_object_exists",
+        reject_object,
+    )
+
+    with pytest.raises(FileNotFoundError, match="S3 object does not exist"):
+        asyncio.run(tes_mcp.get_presigned_url("missing.txt", ctx=context))
+
+
+def test_ensure_object_exists_checks_bucket_and_key(monkeypatch, tes_request):
+    calls = []
+
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    tes_mcp._ensure_object_exists("results/session-123/result.txt")
+
+    assert calls == [
+        {
+            "Bucket": "bucket",
+            "Key": "results/session-123/result.txt",
+        }
+    ]
+
+
+def test_ensure_object_exists_reports_missing_object(monkeypatch, tes_request):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            raise tes_mcp.ClientError(
+                {
+                    "Error": {
+                        "Code": "404",
+                        "Message": "Not Found",
+                    }
+                },
+                "HeadObject",
+            )
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="S3 object does not exist: results/session-123/missing.txt",
+    ):
+        tes_mcp._ensure_object_exists("results/session-123/missing.txt")
+
+
 def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
     monkeypatch.setattr(
@@ -223,6 +281,7 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
     calls = []
 
     async def fake_wait_for_task_finish(task_id):
@@ -265,6 +324,8 @@ def test_get_session_files_presigned_url_uses_configured_executor_image(
 ):
     tes_mcp.settings.executor_image = "python:3.12"
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
 
     async def fake_wait_for_task_finish(task_id):
         return json.dumps({"id": task_id, "state": "COMPLETE"})
