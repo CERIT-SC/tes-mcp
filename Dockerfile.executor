@@ -1,0 +1,26 @@
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        fakeroot \
+        nodejs \
+        npm \
+        python3 \
+        python3-pip \
+        python3-venv \
+        r-base \
+    && python3 -m pip install --no-cache-dir uv \
+    && python3 -m pip install --no-cache-dir \
+        matplotlib \
+        numpy \
+        pandas \
+        scipy \
+        scikit-learn \
+        seaborn \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /data
