@@ -84,7 +84,7 @@ def test_run_script_submits_response(monkeypatch, tes_request):
     }
     command = tes_request["json"]["executors"][0]["command"]
     assert command[:2] == ["/bin/sh", "-c"]
-    assert command[2].endswith("\necho 2")
+    assert command[2].endswith("\necho 2\n" + tes_mcp._ENV_SYNC_SNIPPET)
 
 
 def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
@@ -109,7 +109,7 @@ def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
     }
     command = tes_request["json"]["executors"][0]["command"]
     assert command[:2] == ["/bin/sh", "-c"]
-    assert command[2].endswith("\necho 2 > text.txt")
+    assert command[2].endswith("\necho 2 > text.txt\n" + tes_mcp._ENV_SYNC_SNIPPET)
 
 
 def test_run_script_uses_output_directory(monkeypatch, tes_request):
@@ -172,11 +172,12 @@ def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
     assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
 
 
-def test_wrap_script_prepends_persistent_env_bootstrap():
+def test_wrap_script_wraps_script_between_bootstrap_and_sync():
     wrapped = tes_mcp._wrap_script_with_env("echo hi")
 
-    assert wrapped.startswith(tes_mcp._ENV_BOOTSTRAP_SNIPPET + "\n")
-    assert wrapped.endswith("\necho hi")
+    assert wrapped.startswith(tes_mcp._ENV_BOOTSTRAP_SNIPPET)
+    assert wrapped.endswith(tes_mcp._ENV_SYNC_SNIPPET)
+    assert "\necho hi\n" in wrapped
 
 
 def test_bootstrap_uses_output_path_for_env_dir():
@@ -184,16 +185,33 @@ def test_bootstrap_uses_output_path_for_env_dir():
         tes_mcp.settings.output_path, "mcp-env"
     )
     bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
-    assert f"MCP_ENV={tes_mcp._MCP_ENV_DIR}" in bootstrap
-    assert 'MCP_ENV=${MCP_ENV:-' + tes_mcp._MCP_ENV_DIR in bootstrap
+    assert f"MCP_ENV_PERSIST={tes_mcp._MCP_ENV_DIR}" in bootstrap
+    assert f"MCP_ENV={tes_mcp._MCP_ENV_LIVE_DIR}" in bootstrap
+    assert 'MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/' + tes_mcp._ENV_BUNDLE_NAME + '"' in bootstrap
 
 
-def test_bootstrap_repairs_exec_bits_and_installs_to_target():
+def test_bootstrap_unpacks_bundle_and_installs_to_target():
     bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
 
-    assert "chmod u+x" in bootstrap
+    assert "tar -xzf \"$MCP_ENV_BUNDLE\"" in bootstrap  # unpack persisted env
+    assert "chmod u+x" in bootstrap  # S3 strips modes; repair loose files
     assert 'install --target "$MCP_ENV/py"' in bootstrap  # pip persists to py/
     assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap  # and is importable next task
+
+
+def test_sync_snippet_repacks_bundle_and_preserves_status():
+    sync = tes_mcp._ENV_SYNC_SNIPPET
+
+    assert ") || MCP_STATUS=$?" in sync  # propagate script exit status
+    assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in sync  # skip if unchanged
+    assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in sync  # repack on change
+    assert "exit \"$MCP_STATUS\"" in sync
+
+
+def test_bootstrap_migrates_loose_env_dirs_into_bundle():
+    bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+
+    assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in bootstrap  # venv-era sessions too
 
 
 def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
@@ -211,7 +229,7 @@ def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
 def test_bootstrap_preamble_is_set_e_safe():
     preamble = tes_mcp._ENV_BOOTSTRAP_SNIPPET
 
-    assert preamble.count("|| true") >= 2
+    assert preamble.count("|| true") >= 5
     # mkdir/find/chmod failures must never abort a user script with `set -e`.
     assert "mkdir -p" in preamble
     assert "2>/dev/null || true" in preamble
@@ -358,7 +376,8 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
     command = tes_request["json"]["executors"][0]["command"]
     assert command[:2] == ["/bin/sh", "-c"]
     assert command[2].endswith(
-        "\ntar --exclude=./session-files_session-123.tar.gz --exclude=./mcp-env -czf /archive/session-files_session-123.tar.gz -C /results ."
+        "\ntar --exclude=./session-files_session-123.tar.gz --exclude=./mcp-env -czf /archive/session-files_session-123.tar.gz -C /results .\n"
+        + tes_mcp._ENV_SYNC_SNIPPET
     )
 
 

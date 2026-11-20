@@ -49,35 +49,58 @@ _TERMINAL_TASK_STATES = frozenset(
 )
 _MAX_SLEEP_SECONDS = 300
 
-# Persistent per-session environment directory. It lives under the session
-# output directory (OUTPUT_PATH), which TES stages in before every task and
-# uploads back afterwards, so anything installed there survives across tasks.
+# Persistent per-session environment. The session output directory (OUTPUT_PATH)
+# is the only storage TES stages into every task, but it is synced object by
+# object: a tree of thousands of small files (a pip-installed numpy stack) can
+# take minutes to stage and outlive the k8s job. The environment therefore
+# lives in ONE tarball, env.tar.gz, which is unpacked to /tmp at task start and
+# repacked at task end only when something in it changed.
 _MCP_ENV_DIR = "/data/mcp-env"
+_MCP_ENV_LIVE_DIR = "/tmp/mcp-env"
+_ENV_BUNDLE_NAME = "env.tar.gz"
 
-# POSIX sh snippet prepended to every task script. It repairs file modes the
-# S3 round-trip strips (executors run without capabilities and S3 stores plain
-# objects, so every file comes back 0666), points PATH/PYTHONPATH/
-# LD_LIBRARY_PATH/R_LIBS_USER at the persisted prefix so installs are
-# remembered between tasks, and replaces pip/pip3 with shims that install
-# into the persistent PYTHONPATH directory (a copied virtualenv would mean
-# re-uploading thousands of stdlib files after every task).
+# POSIX sh snippet prepended to every task script. It unpacks the persisted
+# environment bundle, points PATH/PYTHONPATH/LD_LIBRARY_PATH/R_LIBS_USER at
+# the unpacked prefix so installs are remembered between tasks, and replaces
+# pip/pip3 with shims that install into the persistent PYTHONPATH directory.
+# Because S3 object storage does not keep POSIX modes, files kept loose in the
+# session directory (saved binaries) get their exec bits repaired.
 _ENV_BOOTSTRAP_SNIPPET = f"""\
-MCP_ENV={_MCP_ENV_DIR}
-mkdir -p "$MCP_ENV/bin" "$MCP_ENV/py" "$MCP_ENV/prefix" "$MCP_ENV/R" "$MCP_ENV/home" 2>/dev/null
-for d in "$MCP_ENV/bin" "$MCP_ENV/py/bin" "$MCP_ENV/prefix/bin" "$MCP_ENV/prefix/usr/bin" "$MCP_ENV/prefix/usr/local/bin"; do
-    if [ -d "$d" ]; then
-        find "$d" -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
+MCP_ENV_PERSIST={_MCP_ENV_DIR}
+MCP_ENV={_MCP_ENV_LIVE_DIR}
+MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/{_ENV_BUNDLE_NAME}"
+mkdir -p "$MCP_ENV/bin" "$MCP_ENV/py" "$MCP_ENV/prefix" "$MCP_ENV/R" "$MCP_ENV_PERSIST" 2>/dev/null || true
+find "$MCP_ENV_PERSIST/.." -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
+MCP_NEEDS_MIGRATION=0
+[ -d "$MCP_ENV_PERSIST/py" ] && MCP_NEEDS_MIGRATION=1
+[ -d "$MCP_ENV_PERSIST/venv" ] && MCP_NEEDS_MIGRATION=1
+if [ ! -f "$MCP_ENV_BUNDLE" ] && [ "$MCP_NEEDS_MIGRATION" = 1 ]; then
+    for d in "$MCP_ENV_PERSIST/bin" "$MCP_ENV_PERSIST/py/bin" "$MCP_ENV_PERSIST/venv/bin" "$MCP_ENV_PERSIST/prefix/bin" "$MCP_ENV_PERSIST/prefix/usr/bin" "$MCP_ENV_PERSIST/prefix/usr/local/bin"; do
+        if [ -d "$d" ]; then
+            find "$d" -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
+        fi
+    done
+    tar -C "$MCP_ENV_PERSIST" -cf - py venv prefix R bin 2>/dev/null | gzip -1 > "$MCP_ENV_BUNDLE.new" 2>/dev/null || true
+    if [ -s "$MCP_ENV_BUNDLE.new" ]; then
+        mv -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE"
+        rm -rf "$MCP_ENV_PERSIST/py" "$MCP_ENV_PERSIST/venv" "$MCP_ENV_PERSIST/prefix" "$MCP_ENV_PERSIST/R" "$MCP_ENV_PERSIST/bin" "$MCP_ENV_PERSIST/home"
+    else
+        rm -f "$MCP_ENV_BUNDLE.new"
     fi
-done
-find "$MCP_ENV/.." -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
-export HOME="$MCP_ENV/home"
+fi
+if [ -f "$MCP_ENV_BUNDLE" ]; then
+    tar -xzf "$MCP_ENV_BUNDLE" -C "$MCP_ENV" 2>/dev/null || true
+fi
+touch "$MCP_ENV/.stamp"
+mkdir -p /tmp/mcp-home 2>/dev/null || true
+export HOME=/tmp/mcp-home
 export R_LIBS_USER="$MCP_ENV/R"
 export PYTHONPATH="$MCP_ENV/py${{PYTHONPATH:+:$PYTHONPATH}}"
 export PATH="$MCP_ENV/bin:$MCP_ENV/py/bin:$MCP_ENV/prefix/usr/bin:$MCP_ENV/prefix/bin${{PATH:+:$PATH}}"
 export LD_LIBRARY_PATH="$MCP_ENV/prefix/usr/lib/x86_64-linux-gnu:$MCP_ENV/prefix/usr/lib:$MCP_ENV/prefix/lib/x86_64-linux-gnu:$MCP_ENV/prefix/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 cat > "$MCP_ENV/bin/pip" <<'MCP_SHIM_PIP'
 #!/bin/sh
-MCP_ENV=${{MCP_ENV:-{_MCP_ENV_DIR}}}
+MCP_ENV=${{MCP_ENV:-{_MCP_ENV_LIVE_DIR}}}
 if [ "$1" = "install" ]; then
     shift
     exec python3 -m pip --no-cache-dir install --target "$MCP_ENV/py" --upgrade "$@"
@@ -86,15 +109,37 @@ exec python3 -m pip --no-cache-dir "$@"
 MCP_SHIM_PIP
 cat > "$MCP_ENV/bin/pip3" <<'MCP_SHIM_PIP3'
 #!/bin/sh
-exec "${{MCP_ENV:-{_MCP_ENV_DIR}}}/bin/pip" "$@"
+exec "${{MCP_ENV:-{_MCP_ENV_LIVE_DIR}}}/bin/pip" "$@"
 MCP_SHIM_PIP3
 chmod +x "$MCP_ENV/bin/pip" "$MCP_ENV/bin/pip3" 2>/dev/null || true
+MCP_STATUS=0
+(
+"""
+
+# POSIX sh snippet appended after the task script: it repacks the environment
+# bundle when the task changed it (compare against the staging stamp so
+# read-only tasks skip the re-upload) and preserves the script's exit status.
+_ENV_SYNC_SNIPPET = """\
+) || MCP_STATUS=$?
+MCP_NEEDS_SYNC=0
+if [ -n "$(find "$MCP_ENV" -newer "$MCP_ENV/.stamp" -print -quit 2>/dev/null)" ]; then
+    MCP_NEEDS_SYNC=1
+fi
+if [ "$MCP_NEEDS_SYNC" = "1" ]; then
+    tar -C "$MCP_ENV" --exclude='./.stamp' -cf - . 2>/dev/null | gzip -1 > "$MCP_ENV_BUNDLE.new" 2>/dev/null || true
+    if [ -s "$MCP_ENV_BUNDLE.new" ]; then
+        mv -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE"
+    else
+        rm -f "$MCP_ENV_BUNDLE.new"
+    fi
+fi
+exit "$MCP_STATUS"
 """
 
 
 def _wrap_script_with_env(script: str) -> str:
-    """Prepend the persistent-environment bootstrap to a task script."""
-    return _ENV_BOOTSTRAP_SNIPPET + "\n" + script
+    """Run a task script inside the persistent-environment bootstrap."""
+    return _ENV_BOOTSTRAP_SNIPPET + script + "\n" + _ENV_SYNC_SNIPPET
 
 
 @mcp.tool()
@@ -108,10 +153,10 @@ async def run_script(
     Scripts run asynchronously; do not use sleep or wait commands.
     Sleeping only keeps containers alive without any effect.
 
-    A per-session environment in /data/mcp-env persists between tasks of the
-    same session: `pip install` (via the provided pip/pip3 shims) installs
-    into a persistent PYTHONPATH directory that later tasks reuse
-    automatically.
+    A per-session environment is bundled into /data/mcp-env/env.tar.gz and
+    persists between tasks of the same session: `pip install` (via the
+    provided pip/pip3 shims) installs into a persistent PYTHONPATH directory
+    that later tasks reuse automatically.
     """
     if not script.strip():
         raise ValueError("script must not be empty")

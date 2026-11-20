@@ -15,21 +15,26 @@ TES (Task Execution Service) as an MCP tool, enabling users to execute scripts i
 
 Every task starts in a fresh container from `EXECUTOR_IMAGE`, so anything
 installed outside `/data` (system packages, `pip install` into the system
-interpreter) is lost between tasks. To make installs persist, every submitted
-script is automatically prepended with a bootstrap that manages a per-session
-environment in `/data/mcp-env` (inside the session's S3-backed output
-directory, which TES stages before and uploads after every task):
+interpreter) is lost between tasks. The session directory is also staged
+object-by-object, so thousands of small files (e.g. a pip-installed numpy
+stack) can make staging minutes slow. To fix both, every submitted script is
+wrapped by a bootstrap that keeps the per-session environment in a single
+tarball, `/data/mcp-env/env.tar.gz`: it is unpacked to `/tmp/mcp-env` at task
+start and repacked only when the task changed it.
 
-- `py/` — a persistent `pip --target` directory on `PYTHONPATH`. The `pip` /
-  `pip3` shims redirect plain `pip install` here, so packages installed in
-  one task are importable in all later tasks of the session.
-- `prefix/` — extracted binaries/libraries (e.g. `apt-get download pkg && dpkg -x pkg.deb /data/mcp-env/prefix`),
-  put on `PATH` and `LD_LIBRARY_PATH`.
-- `R/` — persistent R package library (`R_LIBS_USER`).
-- `bin/` — the pip/pip3 shims, plus any session-local executables.
+- `pip install` / `pip3 install` (shims) install into a persistent
+  `PYTHONPATH` directory inside the bundle — importable in all later tasks
+  of the session.
+- `prefix/` inside the bundle holds extracted binaries/libraries
+  (e.g. `apt-get download pkg && dpkg -x pkg.deb /tmp/mcp-env/prefix`),
+  on `PATH` and `LD_LIBRARY_PATH`.
+- `R/` inside the bundle is `R_LIBS_USER` (persistent R library).
+- `bin/` inside the bundle holds the pip/pip3 shims and session executables.
 
-Because S3 object storage does not keep POSIX modes, the bootstrap re-adds
-execute bits at the start of every task. Files written by scripts must be
-under `/data` to survive; TES only syncs that directory. The session archive
-(`get_session_files_presigned_url`) excludes `mcp-env` to stay small;
-installed packages are reproducible via pip instead.
+Sessions created before the bundle existed are migrated on their first task
+(loose `py/`/`venv/` trees are folded into the bundle and deleted). Because
+S3 object storage does not keep POSIX modes, loose files saved directly in
+the session directory get their exec bits repaired at task start. Files
+written by scripts must still be under `/data` to survive; TES only syncs
+that directory, and the session archive (`get_session_files_presigned_url`)
+excludes `mcp-env` to stay small.
