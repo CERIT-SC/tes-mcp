@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import posixpath
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ def tes_request(monkeypatch):
         tes_password="password",
         output_path="/results",
         output_url="s3://bucket/results",
+        executor_image="ubuntu:20.04",
     )
     monkeypatch.setattr(tes_mcp, "settings", settings)
 
@@ -80,11 +82,9 @@ def test_run_script_submits_response(monkeypatch, tes_request):
         "url": "s3://bucket/results/session-123",
         "type": "DIRECTORY",
     }
-    assert tes_request["json"]["executors"][0]["command"] == [
-        "/bin/sh",
-        "-c",
-        "echo 2",
-    ]
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    assert command[2].endswith("\necho 2")
 
 
 def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
@@ -107,11 +107,9 @@ def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
         "output_object_key": "results/session-123/text.txt",
         "expires_in": 3600,
     }
-    assert tes_request["json"]["executors"][0]["command"] == [
-        "/bin/sh",
-        "-c",
-        "echo 2 > text.txt",
-    ]
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    assert command[2].endswith("\necho 2 > text.txt")
 
 
 def test_run_script_uses_output_directory(monkeypatch, tes_request):
@@ -172,6 +170,51 @@ def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
     )
 
     assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
+
+
+def test_wrap_script_prepends_persistent_env_bootstrap():
+    wrapped = tes_mcp._wrap_script_with_env("echo hi")
+
+    assert wrapped.startswith(tes_mcp._ENV_BOOTSTRAP_SNIPPET + "\n")
+    assert wrapped.endswith("\necho hi")
+
+
+def test_bootstrap_uses_output_path_for_env_dir():
+    assert tes_mcp._MCP_ENV_DIR == posixpath.join(
+        tes_mcp.settings.output_path, "mcp-env"
+    )
+    bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+    assert f"MCP_ENV={tes_mcp._MCP_ENV_DIR}" in bootstrap
+    assert 'MCP_ENV=${MCP_ENV:-' + tes_mcp._MCP_ENV_DIR in bootstrap
+
+
+def test_bootstrap_repairs_exec_bits_and_installs_to_target():
+    bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+
+    assert "chmod u+x" in bootstrap
+    assert 'install --target "$MCP_ENV/py"' in bootstrap  # pip persists to py/
+    assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap  # and is importable next task
+
+
+def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
+
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    assert command[2] == tes_mcp._wrap_script_with_env("echo 2")
+
+
+def test_bootstrap_preamble_is_set_e_safe():
+    preamble = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+
+    assert preamble.count("|| true") >= 2
+    # mkdir/find/chmod failures must never abort a user script with `set -e`.
+    assert "mkdir -p" in preamble
+    assert "2>/dev/null || true" in preamble
 
 
 def test_list_tasks_requests_session_tasks(monkeypatch, tes_request):
@@ -312,11 +355,11 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
         "type": "DIRECTORY",
     }
     assert tes_request["json"]["executors"][0]["image"] == "ubuntu:20.04"
-    assert tes_request["json"]["executors"][0]["command"] == [
-        "/bin/sh",
-        "-c",
-        "tar --exclude=./session-files_session-123.tar.gz -czf /archive/session-files_session-123.tar.gz -C /results .",
-    ]
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    assert command[2].endswith(
+        "\ntar --exclude=./session-files_session-123.tar.gz --exclude=./mcp-env -czf /archive/session-files_session-123.tar.gz -C /results ."
+    )
 
 
 def test_get_session_files_presigned_url_uses_configured_executor_image(
