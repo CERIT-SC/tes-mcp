@@ -13,33 +13,21 @@ TES (Task Execution Service) as an MCP tool, enabling users to execute scripts i
 
 ## Persistent environment between tasks
 
-Every task starts in a fresh container from `EXECUTOR_IMAGE`, so anything
-installed outside `/data` (system packages, `pip install` into the system
-interpreter) is lost between tasks. The session directory is also staged
-object-by-object, so thousands of small files (e.g. a pip-installed numpy
-stack) can make staging minutes slow. To fix both, every submitted script is
-wrapped by a bootstrap that keeps the per-session environment in a single
-tarball, `/data/mcp-env/env.tar.gz`: it is unpacked to `/tmp/mcp-env` at task
-start and repacked only when the task changed it.
+Every task starts in a fresh container; only `/data` (the S3-backed session
+directory) carries over, and it is synced file by file. To keep installs
+persistent without slowing staging to a crawl, every submitted script is
+wrapped so the session environment lives in a single tarball,
+`/data/mcp-env/env.tar.gz`: unpacked to `/tmp/mcp-env` at task start,
+repacked after the task only if it changed. Staging cost is one file
+regardless of how much is installed.
 
-- `pip install` / `pip3 install` (shims) install into a persistent
-  `PYTHONPATH` directory inside the bundle — importable in all later tasks
-  of the session.
-- `prefix/` inside the bundle holds extracted binaries/libraries
-  (e.g. `mkdir -p /tmp/apt-lists/partial /tmp/apt-cache/archives/partial &&
-  apt-get -o Dir::State::Lists=/tmp/apt-lists -o Dir::Cache=/tmp/apt-cache download pkg
-  && dpkg -x pkg.deb /tmp/mcp-env/prefix` — the `-o` flags and `partial`
-  directories are needed because tasks run unprivileged),
-  on `PATH` and `LD_LIBRARY_PATH`.
-- `R/` inside the bundle is `R_LIBS_USER` (persistent R library).
-- `bin/` inside the bundle holds the pip/pip3 shims and session executables:
-  copy scripts or static binaries there (`cp mytool /tmp/mcp-env/bin/`) and
-  they are on `PATH` in later tasks.
+- `pip install` / `pip3 install` work through shims that install into a
+  persistent `PYTHONPATH` directory inside the bundle.
+- `bin/` — put scripts or static binaries there (`cp mytool /tmp/mcp-env/bin/`);
+  on `PATH` in later tasks.
+- `prefix/` — extracted `.deb`s / libraries (`apt-get download pkg && dpkg -x
+  pkg.deb /tmp/mcp-env/prefix`), on `PATH` and `LD_LIBRARY_PATH`.
+- `R/` — persistent R library (`R_LIBS_USER`).
 
-Sessions created before the bundle existed are migrated on their first task
-(loose `py/`/`venv/` trees are folded into the bundle and deleted). Because
-S3 object storage does not keep POSIX modes, loose files saved directly in
-the session directory get their exec bits repaired at task start. Files
-written by scripts must still be under `/data` to survive; TES only syncs
-that directory, and the session archive (`get_session_files_presigned_url`)
-excludes `mcp-env` to stay small.
+Files written by scripts must be under `/data` to survive. The session
+archive (`get_session_files_presigned_url`) excludes `mcp-env` to stay small.
