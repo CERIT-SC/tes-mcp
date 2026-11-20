@@ -55,9 +55,14 @@ _MAX_SLEEP_SECONDS = 300
 # take minutes to stage and outlive the k8s job. The environment therefore
 # lives in ONE tarball, env.tar.gz, which is unpacked to /tmp at task start and
 # repacked at task end only when something in it changed.
-_MCP_ENV_DIR = "/data/mcp-env"
-_MCP_ENV_LIVE_DIR = "/tmp/mcp-env"
 _ENV_BUNDLE_NAME = "env.tar.gz"
+_ENV_LIVE_DIR = "/tmp/mcp-env"
+
+
+def _get_env_persist_dir() -> str:
+    """Return the bundle location under the configured output directory."""
+    return posixpath.join(settings.output_path, "mcp-env")
+
 
 # POSIX sh snippet prepended to every task script. It unpacks the persisted
 # environment bundle, points PATH/PYTHONPATH/LD_LIBRARY_PATH/R_LIBS_USER at
@@ -65,10 +70,10 @@ _ENV_BUNDLE_NAME = "env.tar.gz"
 # pip/pip3 with shims that install into the persistent PYTHONPATH directory.
 # Because S3 object storage does not keep POSIX modes, files kept loose in the
 # session directory (saved binaries) get their exec bits repaired.
-_ENV_BOOTSTRAP_SNIPPET = f"""\
-MCP_ENV_PERSIST={_MCP_ENV_DIR}
-MCP_ENV={_MCP_ENV_LIVE_DIR}
-MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/{_ENV_BUNDLE_NAME}"
+_ENV_BOOTSTRAP_SNIPPET_TEMPLATE = """\
+MCP_ENV_PERSIST={env_persist_dir}
+MCP_ENV={env_live_dir}
+MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/{env_bundle_name}"
 mkdir -p "$MCP_ENV/bin" "$MCP_ENV/py" "$MCP_ENV/prefix" "$MCP_ENV/R" "$MCP_ENV_PERSIST" 2>/dev/null || true
 find "$MCP_ENV_PERSIST/.." -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
 MCP_NEEDS_MIGRATION=0
@@ -100,7 +105,7 @@ export PATH="$MCP_ENV/bin:$MCP_ENV/py/bin:$MCP_ENV/prefix/usr/bin:$MCP_ENV/prefi
 export LD_LIBRARY_PATH="$MCP_ENV/prefix/usr/lib/x86_64-linux-gnu:$MCP_ENV/prefix/usr/lib:$MCP_ENV/prefix/lib/x86_64-linux-gnu:$MCP_ENV/prefix/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 cat > "$MCP_ENV/bin/pip" <<'MCP_SHIM_PIP'
 #!/bin/sh
-MCP_ENV=${{MCP_ENV:-{_MCP_ENV_LIVE_DIR}}}
+MCP_ENV=${{MCP_ENV:-{env_live_dir}}}
 if [ "$1" = "install" ]; then
     shift
     exec python3 -m pip --no-cache-dir install --target "$MCP_ENV/py" --upgrade "$@"
@@ -109,12 +114,21 @@ exec python3 -m pip --no-cache-dir "$@"
 MCP_SHIM_PIP
 cat > "$MCP_ENV/bin/pip3" <<'MCP_SHIM_PIP3'
 #!/bin/sh
-exec "${{MCP_ENV:-{_MCP_ENV_LIVE_DIR}}}/bin/pip" "$@"
+exec "${{MCP_ENV:-{env_live_dir}}}/bin/pip" "$@"
 MCP_SHIM_PIP3
 chmod +x "$MCP_ENV/bin/pip" "$MCP_ENV/bin/pip3" 2>/dev/null || true
 MCP_STATUS=0
 (
 """
+
+
+def _get_env_bootstrap_snippet() -> str:
+    """Render the bootstrap preamble with the configured paths."""
+    return _ENV_BOOTSTRAP_SNIPPET_TEMPLATE.format(
+        env_persist_dir=_get_env_persist_dir(),
+        env_live_dir=_ENV_LIVE_DIR,
+        env_bundle_name=_ENV_BUNDLE_NAME,
+    )
 
 # POSIX sh snippet appended after the task script: it repacks the environment
 # bundle when the task changed it (compare against the staging stamp so
@@ -139,7 +153,7 @@ exit "$MCP_STATUS"
 
 def _wrap_script_with_env(script: str) -> str:
     """Run a task script inside the persistent-environment bootstrap."""
-    return _ENV_BOOTSTRAP_SNIPPET + script + "\n" + _ENV_SYNC_SNIPPET
+    return _get_env_bootstrap_snippet() + script + "\n" + _ENV_SYNC_SNIPPET
 
 
 @mcp.tool()

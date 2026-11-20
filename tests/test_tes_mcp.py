@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import posixpath
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -175,18 +174,20 @@ def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
 def test_wrap_script_wraps_script_between_bootstrap_and_sync():
     wrapped = tes_mcp._wrap_script_with_env("echo hi")
 
-    assert wrapped.startswith(tes_mcp._ENV_BOOTSTRAP_SNIPPET)
+    assert wrapped.startswith(tes_mcp._get_env_bootstrap_snippet())
     assert wrapped.endswith(tes_mcp._ENV_SYNC_SNIPPET)
     assert "\necho hi\n" in wrapped
 
 
 def test_bootstrap_uses_output_path_for_env_dir():
-    assert tes_mcp._MCP_ENV_DIR == posixpath.join(
-        tes_mcp.settings.output_path, "mcp-env"
-    )
-    bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
-    assert f"MCP_ENV_PERSIST={tes_mcp._MCP_ENV_DIR}" in bootstrap
-    assert f"MCP_ENV={tes_mcp._MCP_ENV_LIVE_DIR}" in bootstrap
+    original = tes_mcp.settings.output_path
+    try:
+        tes_mcp.settings.output_path = "/results"
+        bootstrap = tes_mcp._get_env_bootstrap_snippet()
+    finally:
+        tes_mcp.settings.output_path = original
+
+    assert "MCP_ENV_PERSIST=/results/mcp-env" in bootstrap
     assert (
         'MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/' + tes_mcp._ENV_BUNDLE_NAME + '"'
         in bootstrap
@@ -194,7 +195,7 @@ def test_bootstrap_uses_output_path_for_env_dir():
 
 
 def test_bootstrap_unpacks_bundle_and_installs_to_target():
-    bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+    bootstrap = tes_mcp._get_env_bootstrap_snippet()
 
     assert 'tar -xzf "$MCP_ENV_BUNDLE"' in bootstrap  # unpack persisted env
     assert "chmod u+x" in bootstrap  # S3 strips modes; repair loose files
@@ -212,7 +213,7 @@ def test_sync_snippet_repacks_bundle_and_preserves_status():
 
 
 def test_bootstrap_migrates_loose_env_dirs_into_bundle():
-    bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+    bootstrap = tes_mcp._get_env_bootstrap_snippet()
 
     assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in bootstrap  # venv-era sessions too
 
@@ -230,7 +231,7 @@ def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
 
 
 def test_bootstrap_preamble_is_set_e_safe():
-    preamble = tes_mcp._ENV_BOOTSTRAP_SNIPPET
+    preamble = tes_mcp._get_env_bootstrap_snippet()
 
     assert preamble.count("|| true") >= 5
     # mkdir/find/chmod failures must never abort a user script with `set -e`.
