@@ -187,13 +187,16 @@ def test_bootstrap_uses_output_path_for_env_dir():
     bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
     assert f"MCP_ENV_PERSIST={tes_mcp._MCP_ENV_DIR}" in bootstrap
     assert f"MCP_ENV={tes_mcp._MCP_ENV_LIVE_DIR}" in bootstrap
-    assert 'MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/' + tes_mcp._ENV_BUNDLE_NAME + '"' in bootstrap
+    assert (
+        'MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/' + tes_mcp._ENV_BUNDLE_NAME + '"'
+        in bootstrap
+    )
 
 
 def test_bootstrap_unpacks_bundle_and_installs_to_target():
     bootstrap = tes_mcp._ENV_BOOTSTRAP_SNIPPET
 
-    assert "tar -xzf \"$MCP_ENV_BUNDLE\"" in bootstrap  # unpack persisted env
+    assert 'tar -xzf "$MCP_ENV_BUNDLE"' in bootstrap  # unpack persisted env
     assert "chmod u+x" in bootstrap  # S3 strips modes; repair loose files
     assert 'install --target "$MCP_ENV/py"' in bootstrap  # pip persists to py/
     assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap  # and is importable next task
@@ -205,7 +208,7 @@ def test_sync_snippet_repacks_bundle_and_preserves_status():
     assert ") || MCP_STATUS=$?" in sync  # propagate script exit status
     assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in sync  # skip if unchanged
     assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in sync  # repack on change
-    assert "exit \"$MCP_STATUS\"" in sync
+    assert 'exit "$MCP_STATUS"' in sync
 
 
 def test_bootstrap_migrates_loose_env_dirs_into_bundle():
