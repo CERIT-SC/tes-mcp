@@ -26,10 +26,15 @@ start and repacked only when the task changed it.
   `PYTHONPATH` directory inside the bundle — importable in all later tasks
   of the session.
 - `prefix/` inside the bundle holds extracted binaries/libraries
-  (e.g. `apt-get download pkg && dpkg -x pkg.deb /tmp/mcp-env/prefix`),
+  (e.g. `mkdir -p /tmp/apt-lists/partial /tmp/apt-cache/archives/partial &&
+  apt-get -o Dir::State::Lists=/tmp/apt-lists -o Dir::Cache=/tmp/apt-cache download pkg
+  && dpkg -x pkg.deb /tmp/mcp-env/prefix` — the `-o` flags and `partial`
+  directories are needed because tasks run unprivileged),
   on `PATH` and `LD_LIBRARY_PATH`.
 - `R/` inside the bundle is `R_LIBS_USER` (persistent R library).
-- `bin/` inside the bundle holds the pip/pip3 shims and session executables.
+- `bin/` inside the bundle holds the pip/pip3 shims and session executables:
+  copy scripts or static binaries there (`cp mytool /tmp/mcp-env/bin/`) and
+  they are on `PATH` in later tasks.
 
 Sessions created before the bundle existed are migrated on their first task
 (loose `py/`/`venv/` trees are folded into the bundle and deleted). Because
