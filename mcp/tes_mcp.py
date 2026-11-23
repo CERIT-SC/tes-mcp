@@ -130,6 +130,7 @@ def _get_env_bootstrap_snippet() -> str:
         env_bundle_name=_ENV_BUNDLE_NAME,
     )
 
+
 # POSIX sh snippet appended after the task script: it repacks the environment
 # bundle when the task changed it (compare against the staging stamp so
 # read-only tasks skip the re-upload) and preserves the script's exit status.
