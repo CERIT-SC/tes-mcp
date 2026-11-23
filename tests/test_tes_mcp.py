@@ -273,8 +273,11 @@ def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request, tmp_path
     assert result.returncode == 7, result.stderr
     assert "failed to persist environment changes" in result.stderr
 
-    result = run_wrapped('echo hi > "$MCP_ENV/bin/mytool"', fake=False)
-    assert result.returncode == 0, result.stderr
+    # The preamble touches .stamp just before the script runs; on kernels
+    # with coarse file timestamps, a write in the same tick reads as
+    # not-newer and the repack is skipped. Wait out the tick so the write
+    # is unambiguously newer than the stamp.
+    result = run_wrapped('sleep 1; echo hi > "$MCP_ENV/bin/mytool"', fake=False)
     assert (root / "mcp-env" / tes_mcp._ENV_BUNDLE_NAME).exists()
     assert (live / "bin" / "mytool").exists()
 
