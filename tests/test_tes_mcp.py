@@ -1,10 +1,8 @@
 import asyncio
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -237,11 +235,12 @@ def test_sync_snippet_repacks_bundle_and_preserves_status():
     assert 'exit "$MCP_STATUS"' in sync
 
 
-def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request):
+def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request, tmp_path):
     """A failed bundle repack must not be silent: stderr message + exit 125."""
-    root = Path(tempfile.mkdtemp())
+    root = tmp_path / "root"
+    root.mkdir()
+    live = tmp_path / "live"
     monkeypatch.setattr(tes_mcp.settings, "output_path", str(root))
-    shutil.rmtree("/tmp/mcp-env", ignore_errors=True)
 
     fakebin = root / "fakebin"
     fakebin.mkdir()
@@ -254,7 +253,7 @@ def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request):
         fake.chmod(0o755)
 
     def run_wrapped(inner: str, fake: bool) -> subprocess.CompletedProcess:
-        script = tes_mcp._wrap_script_with_env(inner)
+        script = tes_mcp._wrap_script_with_env(inner, env_live_dir=str(live))
         if fake:
             script = f'PATH="{fakebin}:$PATH"\n' + script
         return subprocess.run(
@@ -277,6 +276,90 @@ def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request):
     result = run_wrapped('echo hi > "$MCP_ENV/bin/mytool"', fake=False)
     assert result.returncode == 0, result.stderr
     assert (root / "mcp-env" / tes_mcp._ENV_BUNDLE_NAME).exists()
+    assert (live / "bin" / "mytool").exists()
+
+
+def test_bootstrap_migration_preserves_home_directory(
+    monkeypatch, tes_request, tmp_path
+):
+    """Migration into the bundle must keep the old persistent HOME content."""
+    persist = tmp_path / "mcp-env"
+    (persist / "py").mkdir(parents=True)
+    home = persist / "home"
+    home.mkdir(parents=True)
+    (home / "mydata.txt").write_text("precious\n")
+    tool = persist / "bin" / "mytool"
+    tool.parent.mkdir()
+    tool.write_text("#!/bin/sh\necho tool-ok\n")
+    tool.chmod(0o755)
+    live = tmp_path / "live"
+    monkeypatch.setattr(tes_mcp.settings, "output_path", str(tmp_path))
+
+    script = tes_mcp._wrap_script_with_env(
+        'echo "$HOME" > "$MCP_ENV_PERSIST/homedump.txt"',
+        env_live_dir=str(live),
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        check=False,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (live / "home" / "mydata.txt").read_text() == "precious\n"
+    assert not home.exists(), "loose home should be migrated into the bundle"
+    assert (persist / "homedump.txt").read_text().strip() == str(live / "home")
+    probe = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            tes_mcp._wrap_script_with_env("mytool", env_live_dir=str(live)),
+        ],
+        check=False,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "tool-ok" in probe.stdout, probe.stderr
+
+
+def test_bootstrap_failed_migration_preserves_legacy_dirs(
+    monkeypatch, tes_request, tmp_path
+):
+    """If bundle creation fails, legacy dirs must survive untouched."""
+    persist = tmp_path / "mcp-env"
+    (persist / "py").mkdir(parents=True)
+    home = persist / "home"
+    home.mkdir()
+    (home / "mydata.txt").write_text("precious\n")
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    fake_tar = fakebin / "tar"
+    fake_tar.write_text("#!/bin/sh\nexit 1\n")
+    fake_tar.chmod(0o755)
+    live = tmp_path / "live"
+    monkeypatch.setattr(tes_mcp.settings, "output_path", str(tmp_path))
+
+    script = f'PATH="{fakebin}:$PATH"\n' + tes_mcp._wrap_script_with_env(
+        "echo done", env_live_dir=str(live)
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        check=False,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (persist / tes_mcp._ENV_BUNDLE_NAME).exists()
+    assert (home / "mydata.txt").read_text() == "precious\n"
+    assert (persist / "py").is_dir()
 
 
 def test_bootstrap_migrates_loose_env_dirs_into_bundle():
@@ -670,13 +753,17 @@ def test_wait_for_task_finish_rejects_empty_id():
         "EXECUTOR_ERROR",
         "SYSTEM_ERROR",
         "CANCELED",
-        "CANCELING",
         "PREEMPTED",
     ],
 )
 def test_wait_for_task_finish_stops_on_all_tes_terminal_states(state):
     assert tes_mcp._is_task_finished({"state": state})
     assert tes_mcp._is_task_finished({"state": state.lower()})
+
+
+def test_wait_for_task_finish_polls_through_canceling():
+    """CANCELING is transient in the TES state machine: keep polling."""
+    assert not tes_mcp._is_task_finished({"state": "CANCELING"})
 
 
 def test_wait_for_task_finish_keeps_polling_on_nonterminal_states():

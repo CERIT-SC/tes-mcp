@@ -51,7 +51,6 @@ _TERMINAL_TASK_STATES = frozenset(
         "EXECUTOR_ERROR",
         "SYSTEM_ERROR",
         "CANCELED",
-        "CANCELING",
         "PREEMPTED",
     }
 )
@@ -79,7 +78,7 @@ if [ ! -f "$MCP_ENV_BUNDLE" ] && [ "$MCP_NEEDS_MIGRATION" = 1 ]; then
             find "$d" -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
         fi
     done
-    tar -C "$MCP_ENV_PERSIST" --ignore-failed-read -cf "$MCP_ENV_BUNDLE.new" py venv prefix R bin 2>/dev/null &&
+    tar -C "$MCP_ENV_PERSIST" --ignore-failed-read -cf "$MCP_ENV_BUNDLE.new" py venv prefix R bin home 2>/dev/null &&
         gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz" 2>/dev/null &&
         mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"
     rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"
@@ -90,8 +89,8 @@ fi
 if [ -f "$MCP_ENV_BUNDLE" ]; then
     tar -xzf "$MCP_ENV_BUNDLE" -C "$MCP_ENV" 2>/dev/null || true
 fi
-mkdir -p /tmp/mcp-home 2>/dev/null || true
-export HOME=/tmp/mcp-home
+mkdir -p "$MCP_ENV/home" 2>/dev/null || true
+export HOME="$MCP_ENV/home"
 export R_LIBS_USER="$MCP_ENV/R"
 export PYTHONPATH="$MCP_ENV/py${{PYTHONPATH:+:$PYTHONPATH}}"
 export PATH="$MCP_ENV/bin:$MCP_ENV/py/bin:$MCP_ENV/prefix/usr/bin:$MCP_ENV/prefix/bin${{PATH:+:$PATH}}"
@@ -116,11 +115,11 @@ MCP_STATUS=0
 """
 
 
-def _get_env_bootstrap_snippet() -> str:
+def _get_env_bootstrap_snippet(env_live_dir: str = _ENV_LIVE_DIR) -> str:
     """Render the bootstrap preamble with the configured paths."""
     return _ENV_BOOTSTRAP_SNIPPET_TEMPLATE.format(
         env_persist_dir=_get_env_persist_dir(),
-        env_live_dir=_ENV_LIVE_DIR,
+        env_live_dir=env_live_dir,
         env_bundle_name=_ENV_BUNDLE_NAME,
     )
 
@@ -149,9 +148,9 @@ exit "$MCP_STATUS"
 """
 
 
-def _wrap_script_with_env(script: str) -> str:
+def _wrap_script_with_env(script: str, env_live_dir: str = _ENV_LIVE_DIR) -> str:
     """Run a task script inside the persistent-environment bootstrap."""
-    return _get_env_bootstrap_snippet() + script + "\n" + _ENV_SYNC_SNIPPET
+    return _get_env_bootstrap_snippet(env_live_dir) + script + "\n" + _ENV_SYNC_SNIPPET
 
 
 @mcp.tool()
