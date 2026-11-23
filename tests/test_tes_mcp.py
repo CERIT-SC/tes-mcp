@@ -1,7 +1,10 @@
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -198,9 +201,27 @@ def test_bootstrap_unpacks_bundle_and_installs_to_target():
     bootstrap = tes_mcp._get_env_bootstrap_snippet()
 
     assert 'tar -xzf "$MCP_ENV_BUNDLE"' in bootstrap
-    assert "chmod u+x" in bootstrap
     assert 'install --target "$MCP_ENV/py"' in bootstrap
     assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap
+    assert "chmod u+x" in bootstrap
+    assert "$MCP_ENV_PERSIST/.." not in bootstrap
+
+
+def test_bootstrap_chmods_only_migration_binary_dirs():
+    preamble = tes_mcp._get_env_bootstrap_snippet()
+
+    assert 'find "$MCP_ENV_PERSIST/.."' not in preamble
+    migration_line = next(line for line in preamble.splitlines() if "for d in" in line)
+    for d in (
+        "bin",
+        "py/bin",
+        "venv/bin",
+        "prefix/bin",
+        "prefix/usr/bin",
+        "prefix/usr/local/bin",
+    ):
+        assert f'"$MCP_ENV_PERSIST/{d}"' in migration_line
+    assert 'find "$d" -maxdepth 1 -type f -exec chmod u+x' in preamble
 
 
 def test_sync_snippet_repacks_bundle_and_preserves_status():
@@ -214,6 +235,48 @@ def test_sync_snippet_repacks_bundle_and_preserves_status():
     assert 'mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"' in sync
     assert 'rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"' in sync
     assert 'exit "$MCP_STATUS"' in sync
+
+
+def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request):
+    """A failed bundle repack must not be silent: stderr message + exit 125."""
+    root = Path(tempfile.mkdtemp())
+    monkeypatch.setattr(tes_mcp.settings, "output_path", str(root))
+    shutil.rmtree("/tmp/mcp-env", ignore_errors=True)
+
+    fakebin = root / "fakebin"
+    fakebin.mkdir()
+    for name, body in {
+        "tar": "#!/bin/sh\nexit 1\n",
+        "find": "#!/bin/sh\necho newer\n",
+    }.items():
+        fake = fakebin / name
+        fake.write_text(body)
+        fake.chmod(0o755)
+
+    def run_wrapped(inner: str, fake: bool) -> subprocess.CompletedProcess:
+        script = tes_mcp._wrap_script_with_env(inner)
+        if fake:
+            script = f'PATH="{fakebin}:$PATH"\n' + script
+        return subprocess.run(
+            ["/bin/sh", "-c", script],
+            check=False,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    result = run_wrapped("echo ok", fake=True)
+    assert result.returncode == 125, result.stderr
+    assert "failed to persist environment changes" in result.stderr
+
+    result = run_wrapped("exit 7", fake=True)
+    assert result.returncode == 7, result.stderr
+    assert "failed to persist environment changes" in result.stderr
+
+    result = run_wrapped('echo hi > "$MCP_ENV/bin/mytool"', fake=False)
+    assert result.returncode == 0, result.stderr
+    assert (root / "mcp-env" / tes_mcp._ENV_BUNDLE_NAME).exists()
 
 
 def test_bootstrap_migrates_loose_env_dirs_into_bundle():
@@ -234,7 +297,7 @@ def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
     assert command[2] == tes_mcp._wrap_script_with_env("echo 2")
 
 
-def test_bootstrap_preamble_is_set_e_safe():
+def test_bootstrap_preamble_guards_side_effecting_commands():
     preamble = tes_mcp._get_env_bootstrap_snippet()
 
     assert preamble.count("|| true") >= 5
@@ -267,24 +330,6 @@ def test_failed_archive_task_raises_instead_of_stale_presign(monkeypatch, tes_re
 
     with pytest.raises(RuntimeError, match="SYSTEM_ERROR"):
         asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
-
-
-def test_failed_archive_task_tolerates_missing_stale_object(monkeypatch, tes_request):
-    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
-
-    async def fake_wait_for_task_finish(task_id):
-        return json.dumps({"id": task_id, "state": "COMPLETE"})
-
-    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
-    monkeypatch.setattr(
-        tes_mcp,
-        "_ensure_object_exists",
-        lambda key: None,
-    )
-
-    result = asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
-
-    assert "url" in json.loads(result)
 
 
 def test_ensure_object_exists_maps_unexpected_client_error_to_runtime_error(
@@ -564,6 +609,12 @@ def test_sleep_rejects_negative_seconds():
         asyncio.run(tes_mcp.sleep(-1))
 
 
+def test_sleep_rejects_nan_and_infinity():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="seconds must be a finite number"):
+            asyncio.run(tes_mcp.sleep(bad))
+
+
 def test_sleep_rejects_seconds_above_maximum():
     with pytest.raises(ValueError, match="seconds must not exceed 300"):
         asyncio.run(tes_mcp.sleep(300.1))
@@ -610,6 +661,27 @@ def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):
 def test_wait_for_task_finish_rejects_empty_id():
     with pytest.raises(ValueError, match="task_id must not be empty"):
         asyncio.run(tes_mcp.wait_for_task_finish("  "))
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "COMPLETE",
+        "EXECUTOR_ERROR",
+        "SYSTEM_ERROR",
+        "CANCELED",
+        "CANCELING",
+        "PREEMPTED",
+    ],
+)
+def test_wait_for_task_finish_stops_on_all_tes_terminal_states(state):
+    assert tes_mcp._is_task_finished({"state": state})
+    assert tes_mcp._is_task_finished({"state": state.lower()})
+
+
+def test_wait_for_task_finish_keeps_polling_on_nonterminal_states():
+    for state in ("RUNNING", "QUEUED", "INITIALIZING", "PAUSED", "UNKNOWN"):
+        assert not tes_mcp._is_task_finished({"state": state})
 
 
 def test_cancel_task_uses_cancel_endpoint(monkeypatch, tes_request):

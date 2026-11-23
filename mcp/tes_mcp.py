@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 import posixpath
 import re
 import uuid
@@ -45,7 +46,14 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer("tes")
 settings = Settings()  # type: ignore[call-arg]
 _TERMINAL_TASK_STATES = frozenset(
-    {"COMPLETE", "EXECUTOR_ERROR", "SYSTEM_ERROR", "CANCELED"}
+    {
+        "COMPLETE",
+        "EXECUTOR_ERROR",
+        "SYSTEM_ERROR",
+        "CANCELED",
+        "CANCELING",
+        "PREEMPTED",
+    }
 )
 _MAX_SLEEP_SECONDS = 300
 _ENV_BUNDLE_NAME = "env.tar.gz"
@@ -62,7 +70,6 @@ MCP_ENV_PERSIST={env_persist_dir}
 MCP_ENV={env_live_dir}
 MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/{env_bundle_name}"
 mkdir -p "$MCP_ENV/bin" "$MCP_ENV/py" "$MCP_ENV/prefix" "$MCP_ENV/R" "$MCP_ENV_PERSIST" 2>/dev/null || true
-find "$MCP_ENV_PERSIST/.." -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
 MCP_NEEDS_MIGRATION=0
 [ -d "$MCP_ENV_PERSIST/py" ] && MCP_NEEDS_MIGRATION=1
 [ -d "$MCP_ENV_PERSIST/venv" ] && MCP_NEEDS_MIGRATION=1
@@ -126,9 +133,16 @@ if [ -n "$(find "$MCP_ENV" -newer "$MCP_ENV/.stamp" -print -quit 2>/dev/null)" ]
     MCP_NEEDS_SYNC=1
 fi
 if [ "$MCP_NEEDS_SYNC" = "1" ]; then
-    tar -C "$MCP_ENV" --exclude='./.stamp' --ignore-failed-read -cf "$MCP_ENV_BUNDLE.new" . 2>/dev/null &&
-        gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz" 2>/dev/null &&
-        mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"
+    if tar -C "$MCP_ENV" --exclude='./.stamp' --ignore-failed-read -cf "$MCP_ENV_BUNDLE.new" . &&
+        gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz" &&
+        mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"; then
+        :
+    else
+        echo "mcp-env: failed to persist environment changes to $MCP_ENV_BUNDLE" >&2
+        if [ "$MCP_STATUS" -eq 0 ]; then
+            MCP_STATUS=125
+        fi
+    fi
     rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"
 fi
 exit "$MCP_STATUS"
@@ -148,13 +162,14 @@ async def run_script(
 ) -> str:
     """Run a shell script and return a temporary URL for its output file.
 
-    Scripts run asynchronously; do not use sleep or wait commands.
-    Sleeping only keeps containers alive without any effect.
+    Scripts run asynchronously; do not use shell sleep or wait commands inside
+    the script — they only keep the container alive. To pace multi-task
+    flows, use the `sleep` and `wait_for_task_finish` tools between tasks.
 
-    A per-session environment is bundled into /data/mcp-env/env.tar.gz and
-    persists between tasks of the same session: `pip install` (via the
-    provided pip/pip3 shims) installs into a persistent PYTHONPATH directory
-    that later tasks reuse automatically.
+    A per-session environment is bundled into OUTPUT_PATH/mcp-env/env.tar.gz
+    (default /data/mcp-env/env.tar.gz) and persists between tasks of the same
+    session: `pip install` (via the provided pip/pip3 shims) installs into a
+    persistent PYTHONPATH directory that later tasks reuse automatically.
     """
     if not script.strip():
         raise ValueError("script must not be empty")
@@ -338,6 +353,8 @@ async def get_task(task_id: str) -> str:
 @mcp.tool()
 async def sleep(seconds: float) -> str:
     """Wait for up to 300 seconds before returning."""
+    if not math.isfinite(seconds):
+        raise ValueError("seconds must be a finite number")
     if seconds < 0:
         raise ValueError("seconds must not be negative")
     if seconds > _MAX_SLEEP_SECONDS:
