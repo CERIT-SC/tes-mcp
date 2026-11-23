@@ -4,4 +4,4 @@
 .venv
 .vscode
 __pycache__
-deploy/k8s
+k8s
