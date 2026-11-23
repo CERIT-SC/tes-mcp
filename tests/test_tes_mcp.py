@@ -343,6 +343,9 @@ def test_bootstrap_failed_migration_preserves_legacy_dirs(
     live = tmp_path / "live"
     monkeypatch.setattr(tes_mcp.settings, "output_path", str(tmp_path))
 
+    live.mkdir()
+    (live / ".stamp").touch()
+
     script = f'PATH="{fakebin}:$PATH"\n' + tes_mcp._wrap_script_with_env(
         "echo done", env_live_dir=str(live)
     )
