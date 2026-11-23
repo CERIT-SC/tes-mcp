@@ -206,9 +206,16 @@ def test_bootstrap_unpacks_bundle_and_installs_to_target():
 def test_sync_snippet_repacks_bundle_and_preserves_status():
     sync = tes_mcp._ENV_SYNC_SNIPPET
 
-    assert ") || MCP_STATUS=$?" in sync  # propagate script exit status
+    # Standalone subshell close: `(...) || MCP_STATUS=$?` would disable the
+    # user's `set -e` inside the subshell.
+    assert sync.startswith(")\nMCP_STATUS=$?\n")  # propagate script exit status
     assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in sync  # skip if unchanged
     assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in sync  # repack on change
+    # Checked pipeline: a failed tar/gzip must never replace a good bundle.
+    assert "--ignore-failed-read" in sync
+    assert 'gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz"' in sync
+    assert 'mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"' in sync
+    assert 'rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"' in sync
     assert 'exit "$MCP_STATUS"' in sync
 
 
@@ -237,6 +244,72 @@ def test_bootstrap_preamble_is_set_e_safe():
     # mkdir/find/chmod failures must never abort a user script with `set -e`.
     assert "mkdir -p" in preamble
     assert "2>/dev/null || true" in preamble
+
+
+def test_bootstrap_touches_stamp_after_writing_shims():
+    preamble = tes_mcp._get_env_bootstrap_snippet()
+
+    # The pip/pip3 shims are rewritten on every task; if .stamp were touched
+    # first, the shims would always read as newer and every task would repack
+    # and re-upload the whole bundle.
+    assert preamble.rindex('touch "$MCP_ENV/.stamp"') > preamble.rindex("MCP_SHIM_PIP3")
+
+
+def test_user_script_runs_inside_subshell_before_status_capture():
+    preamble = tes_mcp._get_env_bootstrap_snippet()
+    sync = tes_mcp._ENV_SYNC_SNIPPET
+
+    # set -e must stay effective for the user script: the subshell closes as a
+    # standalone command and its status is captured on the next line.
+    assert preamble.rstrip("\n").endswith("(")
+    assert sync.startswith(")\nMCP_STATUS=$?\n")
+
+
+def test_failed_archive_task_raises_instead_of_stale_presign(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
+
+    async def fake_wait_for_task_finish(task_id):
+        return json.dumps({"id": task_id, "state": "SYSTEM_ERROR"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
+
+    with pytest.raises(RuntimeError, match="SYSTEM_ERROR"):
+        asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+
+def test_failed_archive_task_tolerates_missing_stale_object(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    async def fake_wait_for_task_finish(task_id):
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
+    monkeypatch.setattr(
+        tes_mcp,
+        "_ensure_object_exists",
+        lambda key: None,
+    )
+
+    result = asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+    assert "url" in json.loads(result)
+
+
+def test_ensure_object_exists_maps_unexpected_client_error_to_runtime_error(
+    monkeypatch, tes_request
+):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            raise tes_mcp.ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Forbidden"}},
+                "HeadObject",
+            )
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    with pytest.raises(RuntimeError, match="Unable to verify S3 object"):
+        tes_mcp._ensure_object_exists("results/session-123/missing.txt")
 
 
 def test_list_tasks_requests_session_tasks(monkeypatch, tes_request):

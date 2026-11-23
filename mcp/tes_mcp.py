@@ -48,13 +48,6 @@ _TERMINAL_TASK_STATES = frozenset(
     {"COMPLETE", "EXECUTOR_ERROR", "SYSTEM_ERROR", "CANCELED"}
 )
 _MAX_SLEEP_SECONDS = 300
-
-# Persistent per-session environment. The session output directory (OUTPUT_PATH)
-# is the only storage TES stages into every task, but it is synced object by
-# object: a tree of thousands of small files (a pip-installed numpy stack) can
-# take minutes to stage and outlive the k8s job. The environment therefore
-# lives in ONE tarball, env.tar.gz, which is unpacked to /tmp at task start and
-# repacked at task end only when something in it changed.
 _ENV_BUNDLE_NAME = "env.tar.gz"
 _ENV_LIVE_DIR = "/tmp/mcp-env"
 
@@ -64,12 +57,6 @@ def _get_env_persist_dir() -> str:
     return posixpath.join(settings.output_path, "mcp-env")
 
 
-# POSIX sh snippet prepended to every task script. It unpacks the persisted
-# environment bundle, points PATH/PYTHONPATH/LD_LIBRARY_PATH/R_LIBS_USER at
-# the unpacked prefix so installs are remembered between tasks, and replaces
-# pip/pip3 with shims that install into the persistent PYTHONPATH directory.
-# Because S3 object storage does not keep POSIX modes, files kept loose in the
-# session directory (saved binaries) get their exec bits repaired.
 _ENV_BOOTSTRAP_SNIPPET_TEMPLATE = """\
 MCP_ENV_PERSIST={env_persist_dir}
 MCP_ENV={env_live_dir}
@@ -85,18 +72,17 @@ if [ ! -f "$MCP_ENV_BUNDLE" ] && [ "$MCP_NEEDS_MIGRATION" = 1 ]; then
             find "$d" -maxdepth 1 -type f -exec chmod u+x {{}} + 2>/dev/null || true
         fi
     done
-    tar -C "$MCP_ENV_PERSIST" -cf - py venv prefix R bin 2>/dev/null | gzip -1 > "$MCP_ENV_BUNDLE.new" 2>/dev/null || true
-    if [ -s "$MCP_ENV_BUNDLE.new" ]; then
-        mv -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE"
+    tar -C "$MCP_ENV_PERSIST" --ignore-failed-read -cf "$MCP_ENV_BUNDLE.new" py venv prefix R bin 2>/dev/null &&
+        gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz" 2>/dev/null &&
+        mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"
+    rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"
+    if [ -f "$MCP_ENV_BUNDLE" ]; then
         rm -rf "$MCP_ENV_PERSIST/py" "$MCP_ENV_PERSIST/venv" "$MCP_ENV_PERSIST/prefix" "$MCP_ENV_PERSIST/R" "$MCP_ENV_PERSIST/bin" "$MCP_ENV_PERSIST/home"
-    else
-        rm -f "$MCP_ENV_BUNDLE.new"
     fi
 fi
 if [ -f "$MCP_ENV_BUNDLE" ]; then
     tar -xzf "$MCP_ENV_BUNDLE" -C "$MCP_ENV" 2>/dev/null || true
 fi
-touch "$MCP_ENV/.stamp"
 mkdir -p /tmp/mcp-home 2>/dev/null || true
 export HOME=/tmp/mcp-home
 export R_LIBS_USER="$MCP_ENV/R"
@@ -117,6 +103,7 @@ cat > "$MCP_ENV/bin/pip3" <<'MCP_SHIM_PIP3'
 exec "${{MCP_ENV:-{env_live_dir}}}/bin/pip" "$@"
 MCP_SHIM_PIP3
 chmod +x "$MCP_ENV/bin/pip" "$MCP_ENV/bin/pip3" 2>/dev/null || true
+touch "$MCP_ENV/.stamp"
 MCP_STATUS=0
 (
 """
@@ -131,22 +118,18 @@ def _get_env_bootstrap_snippet() -> str:
     )
 
 
-# POSIX sh snippet appended after the task script: it repacks the environment
-# bundle when the task changed it (compare against the staging stamp so
-# read-only tasks skip the re-upload) and preserves the script's exit status.
 _ENV_SYNC_SNIPPET = """\
-) || MCP_STATUS=$?
+)
+MCP_STATUS=$?
 MCP_NEEDS_SYNC=0
 if [ -n "$(find "$MCP_ENV" -newer "$MCP_ENV/.stamp" -print -quit 2>/dev/null)" ]; then
     MCP_NEEDS_SYNC=1
 fi
 if [ "$MCP_NEEDS_SYNC" = "1" ]; then
-    tar -C "$MCP_ENV" --exclude='./.stamp' -cf - . 2>/dev/null | gzip -1 > "$MCP_ENV_BUNDLE.new" 2>/dev/null || true
-    if [ -s "$MCP_ENV_BUNDLE.new" ]; then
-        mv -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE"
-    else
-        rm -f "$MCP_ENV_BUNDLE.new"
-    fi
+    tar -C "$MCP_ENV" --exclude='./.stamp' --ignore-failed-read -cf "$MCP_ENV_BUNDLE.new" . 2>/dev/null &&
+        gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz" 2>/dev/null &&
+        mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"
+    rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"
 fi
 exit "$MCP_STATUS"
 """
@@ -307,7 +290,13 @@ async def get_session_files_presigned_url(ctx: Context) -> str:
             ],
         }
         task = await asyncio.to_thread(_make_tes_request, "post", json=payload)
-        await wait_for_task_finish(task["id"])
+        finished_task = json.loads(await wait_for_task_finish(task["id"]))
+        final_state = finished_task.get("state") or finished_task.get("status") or ""
+        if str(final_state).upper() != "COMPLETE":
+            raise RuntimeError(
+                f"Archive task {task['id']} finished in state {final_state}; "
+                "no fresh session archive was produced"
+            )
         archive_object_key = _get_output_object_key(session_id, archive_name)
         await asyncio.to_thread(_ensure_object_exists, archive_object_key)
         archive_url = await asyncio.to_thread(
