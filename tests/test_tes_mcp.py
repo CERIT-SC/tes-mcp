@@ -197,21 +197,18 @@ def test_bootstrap_uses_output_path_for_env_dir():
 def test_bootstrap_unpacks_bundle_and_installs_to_target():
     bootstrap = tes_mcp._get_env_bootstrap_snippet()
 
-    assert 'tar -xzf "$MCP_ENV_BUNDLE"' in bootstrap  # unpack persisted env
-    assert "chmod u+x" in bootstrap  # S3 strips modes; repair loose files
-    assert 'install --target "$MCP_ENV/py"' in bootstrap  # pip persists to py/
-    assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap  # and is importable next task
+    assert 'tar -xzf "$MCP_ENV_BUNDLE"' in bootstrap
+    assert "chmod u+x" in bootstrap
+    assert 'install --target "$MCP_ENV/py"' in bootstrap
+    assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap
 
 
 def test_sync_snippet_repacks_bundle_and_preserves_status():
     sync = tes_mcp._ENV_SYNC_SNIPPET
 
-    # Standalone subshell close: `(...) || MCP_STATUS=$?` would disable the
-    # user's `set -e` inside the subshell.
-    assert sync.startswith(")\nMCP_STATUS=$?\n")  # propagate script exit status
-    assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in sync  # skip if unchanged
-    assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in sync  # repack on change
-    # Checked pipeline: a failed tar/gzip must never replace a good bundle.
+    assert sync.startswith(")\nMCP_STATUS=$?\n")
+    assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in sync
+    assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in sync
     assert "--ignore-failed-read" in sync
     assert 'gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz"' in sync
     assert 'mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"' in sync
@@ -222,7 +219,7 @@ def test_sync_snippet_repacks_bundle_and_preserves_status():
 def test_bootstrap_migrates_loose_env_dirs_into_bundle():
     bootstrap = tes_mcp._get_env_bootstrap_snippet()
 
-    assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in bootstrap  # venv-era sessions too
+    assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in bootstrap
 
 
 def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
@@ -241,7 +238,6 @@ def test_bootstrap_preamble_is_set_e_safe():
     preamble = tes_mcp._get_env_bootstrap_snippet()
 
     assert preamble.count("|| true") >= 5
-    # mkdir/find/chmod failures must never abort a user script with `set -e`.
     assert "mkdir -p" in preamble
     assert "2>/dev/null || true" in preamble
 
@@ -249,9 +245,6 @@ def test_bootstrap_preamble_is_set_e_safe():
 def test_bootstrap_touches_stamp_after_writing_shims():
     preamble = tes_mcp._get_env_bootstrap_snippet()
 
-    # The pip/pip3 shims are rewritten on every task; if .stamp were touched
-    # first, the shims would always read as newer and every task would repack
-    # and re-upload the whole bundle.
     assert preamble.rindex('touch "$MCP_ENV/.stamp"') > preamble.rindex("MCP_SHIM_PIP3")
 
 
@@ -259,8 +252,6 @@ def test_user_script_runs_inside_subshell_before_status_capture():
     preamble = tes_mcp._get_env_bootstrap_snippet()
     sync = tes_mcp._ENV_SYNC_SNIPPET
 
-    # set -e must stay effective for the user script: the subshell closes as a
-    # standalone command and its status is captured on the next line.
     assert preamble.rstrip("\n").endswith("(")
     assert sync.startswith(")\nMCP_STATUS=$?\n")
 
