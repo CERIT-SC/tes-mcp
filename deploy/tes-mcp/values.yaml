@@ -8,7 +8,7 @@ image:
   repository: cerit.io/robindurnik/mcp-tes
   tag: latest
   digest: ""        # e.g. sha256:abc123... — set to pin; overrides tag
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 imagePullSecrets: []
 
