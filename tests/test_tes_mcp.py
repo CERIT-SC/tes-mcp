@@ -709,7 +709,7 @@ def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):
     responses = iter(
         [
             {"id": "task-123", "state": "RUNNING"},
-            {"id": "task-123", "state": "COMPLETE"},
+            {"id": "task-123", "state": "COMPLETE", "logs": ["full task details"]},
         ]
     )
     waits = []
@@ -741,6 +741,16 @@ def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):
         },
     ]
     assert waits == [1]
+
+
+def test_wait_for_task_finish_returns_fallback_state(monkeypatch, tes_request):
+    monkeypatch.setattr(
+        tes_mcp, "_make_tes_request", lambda *args, **kwargs: {"status": "COMPLETE"}
+    )
+
+    result = asyncio.run(tes_mcp.wait_for_task_finish("task-123"))
+
+    assert json.loads(result) == {"id": "task-123", "state": "COMPLETE"}
 
 
 def test_wait_for_task_finish_rejects_empty_id():

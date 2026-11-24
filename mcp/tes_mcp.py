@@ -315,7 +315,10 @@ async def wait_for_task_finish(task_id: str) -> str:
             params={"view": "FULL"},
         )
         if _is_task_finished(result):
-            return json.dumps(result, indent=2)
+            state = result.get("state") or result.get("status") or ""
+            return json.dumps(
+                {"id": result.get("id") or task_id, "state": state}, indent=2
+            )
         await asyncio.sleep(1)
 
 
