@@ -1,0 +1,24 @@
+# secrets and local state
+.env
+**/.env
+.venv/
+**/.venv/
+
+# python artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+
+# tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# deployment manifests (not needed in image)
+deploy/
