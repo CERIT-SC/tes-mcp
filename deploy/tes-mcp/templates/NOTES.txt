@@ -1,0 +1,6 @@
+{{- $host := include "tes-mcp.host" . -}}
+{{ .Chart.Name }} is deployed.
+
+  URL:  https://{{ $host }}/
+
+  Auth is handled by the TES backend itself; log in with your TES account.

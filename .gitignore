@@ -4,4 +4,5 @@
 .venv
 .vscode
 __pycache__
-deploy
+k8s
+deploy/tes-mcp-values.yaml
