@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tes-mcp.fullname" . }}
+  labels:
+{{ include "tes-mcp.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "tes-mcp.selectorLabels" . | indent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP # application HTTP port
+          port: {{ .Values.service.port }}
+        - protocol: TCP # cert-manager ACME HTTP-01 challenge
+          port: 8089
