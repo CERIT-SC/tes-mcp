@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,14 @@ def test_settings_rejects_invalid_tes_url():
         )
 
 
+MODULE_DIR = Path(__file__).parents[1] / "mcp"
+
+
+def wrapper_script() -> str:
+    """Read the env wrapper script baked into the executor image."""
+    return (MODULE_DIR / "env_wrapper.sh").read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def tes_request(monkeypatch):
     request = {}
@@ -43,6 +52,7 @@ def tes_request(monkeypatch):
         tes_password="password",
         output_path="/results",
         output_url="s3://bucket/results",
+        executor_image="ubuntu:20.04",
     )
     monkeypatch.setattr(tes_mcp, "settings", settings)
 
@@ -80,9 +90,11 @@ def test_run_script_submits_response(monkeypatch, tes_request):
         "url": "s3://bucket/results/session-123",
         "type": "DIRECTORY",
     }
-    assert tes_request["json"]["executors"][0]["command"] == [
-        "/bin/sh",
-        "-c",
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
         "echo 2",
     ]
 
@@ -107,9 +119,11 @@ def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
         "output_object_key": "results/session-123/text.txt",
         "expires_in": 3600,
     }
-    assert tes_request["json"]["executors"][0]["command"] == [
-        "/bin/sh",
-        "-c",
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
         "echo 2 > text.txt",
     ]
 
@@ -174,6 +188,283 @@ def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
     assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
 
 
+def test_wrapper_command_puts_variables_in_argv():
+    tes_mcp.settings.output_path = "/results"
+    try:
+        command = tes_mcp._get_wrapper_command("echo hi")
+    finally:
+        tes_mcp.settings.output_path = "/data"
+
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        "echo hi",
+    ]
+
+
+def test_wrapper_command_uses_output_path_for_env_dir():
+    original = tes_mcp.settings.output_path
+    try:
+        tes_mcp.settings.output_path = "/results"
+        command = tes_mcp._get_wrapper_command("echo hi")
+    finally:
+        tes_mcp.settings.output_path = original
+
+    assert command[1] == "/results/mcp-env"
+
+
+def test_wrapper_unpacks_bundle_and_installs_to_target():
+    script = wrapper_script()
+
+    assert 'tar -xzf "$MCP_ENV_BUNDLE"' in script
+    assert 'install --target "$MCP_ENV/py"' in script
+    assert 'PYTHONPATH="$MCP_ENV/py' in script
+    assert "chmod u+x" in script
+    assert "$MCP_ENV_PERSIST/.." not in script
+
+
+def test_wrapper_chmods_only_migration_binary_dirs():
+    script = wrapper_script()
+
+    assert 'find "$MCP_ENV_PERSIST/.."' not in script
+    migration_line = next(line for line in script.splitlines() if "for d in" in line)
+    for d in (
+        "bin",
+        "py/bin",
+        "venv/bin",
+        "prefix/bin",
+        "prefix/usr/bin",
+        "prefix/usr/local/bin",
+    ):
+        assert f'"$MCP_ENV_PERSIST/{d}"' in migration_line
+    assert 'find "$d" -maxdepth 1 -type f -exec chmod u+x' in script
+
+
+def test_wrapper_repacks_bundle_and_preserves_status():
+    script = wrapper_script()
+
+    assert ")\nMCP_STATUS=$?\n" in script
+    assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in script
+    assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in script
+    assert "--ignore-failed-read" in script
+    assert 'gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz"' in script
+    assert 'mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"' in script
+    assert 'rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"' in script
+    assert script.endswith('exit "$MCP_STATUS"\n')
+
+
+def test_wrapper_surfaces_repack_failure(monkeypatch, tes_request, tmp_path):
+    """A failed bundle repack must not be silent: stderr message + exit 125."""
+    root = tmp_path / "root"
+    root.mkdir()
+    live = tmp_path / "live"
+    monkeypatch.setattr(tes_mcp.settings, "output_path", str(root))
+
+    fakebin = root / "fakebin"
+    fakebin.mkdir()
+    for name, body in {
+        "tar": "#!/bin/sh\nexit 1\n",
+        "find": "#!/bin/sh\necho newer\n",
+    }.items():
+        fake = fakebin / name
+        fake.write_text(body)
+        fake.chmod(0o755)
+
+    def run_wrapped(inner: str, fake: bool) -> subprocess.CompletedProcess:
+        argv = [
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(root / "mcp-env"),
+            str(live),
+            inner,
+        ]
+        if fake:
+            argv = ["/usr/bin/env", f"PATH={fakebin}:{os.environ['PATH']}"] + argv
+        return subprocess.run(
+            argv,
+            check=False,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    result = run_wrapped("echo ok", fake=True)
+    assert result.returncode == 125, result.stderr
+    assert "failed to persist environment changes" in result.stderr
+
+    result = run_wrapped("exit 7", fake=True)
+    assert result.returncode == 7, result.stderr
+    assert "failed to persist environment changes" in result.stderr
+
+    result = run_wrapped('sleep 1; echo hi > "$MCP_ENV/bin/mytool"', fake=False)
+    assert (root / "mcp-env" / "env.tar.gz").exists()
+    assert (live / "bin" / "mytool").exists()
+
+
+def test_bootstrap_migration_preserves_home_directory(
+    monkeypatch, tes_request, tmp_path
+):
+    """Migration into the bundle must keep the old persistent HOME content."""
+    persist = tmp_path / "mcp-env"
+    (persist / "py").mkdir(parents=True)
+    home = persist / "home"
+    home.mkdir(parents=True)
+    (home / "mydata.txt").write_text("precious\n")
+    tool = persist / "bin" / "mytool"
+    tool.parent.mkdir()
+    tool.write_text("#!/bin/sh\necho tool-ok\n")
+    tool.chmod(0o755)
+    live = tmp_path / "live"
+    monkeypatch.setattr(tes_mcp.settings, "output_path", str(tmp_path))
+
+    result = subprocess.run(
+        [
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(persist),
+            str(live),
+            'echo "$HOME" > "$MCP_ENV_PERSIST/homedump.txt"',
+        ],
+        check=False,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (live / "home" / "mydata.txt").read_text() == "precious\n"
+    assert not home.exists(), "loose home should be migrated into the bundle"
+    assert (persist / "homedump.txt").read_text().strip() == str(live / "home")
+    probe = subprocess.run(
+        [
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(persist),
+            str(live),
+            "mytool",
+        ],
+        check=False,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "tool-ok" in probe.stdout, probe.stderr
+
+
+def test_bootstrap_failed_migration_preserves_legacy_dirs(
+    monkeypatch, tes_request, tmp_path
+):
+    """If bundle creation fails, legacy dirs must survive untouched."""
+    persist = tmp_path / "mcp-env"
+    (persist / "py").mkdir(parents=True)
+    home = persist / "home"
+    home.mkdir()
+    (home / "mydata.txt").write_text("precious\n")
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    fake_tar = fakebin / "tar"
+    fake_tar.write_text("#!/bin/sh\nexit 1\n")
+    fake_tar.chmod(0o755)
+    live = tmp_path / "live"
+    monkeypatch.setattr(tes_mcp.settings, "output_path", str(tmp_path))
+
+    live.mkdir()
+    (live / ".stamp").touch()
+
+    result = subprocess.run(
+        [
+            "/usr/bin/env",
+            f"PATH={fakebin}:{os.environ['PATH']}",
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(persist),
+            str(live),
+            "echo done",
+        ],
+        check=False,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (persist / "env.tar.gz").exists()
+    assert (home / "mydata.txt").read_text() == "precious\n"
+    assert (persist / "py").is_dir()
+
+
+def test_wrapper_migrates_loose_env_dirs_into_bundle():
+    script = wrapper_script()
+
+    assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in script
+
+
+def test_run_script_wraps_script_with_env_wrapper(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    asyncio.run(
+        tes_mcp.run_script("echo 2", ctx=context, output_file_name="output.txt")
+    )
+
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        "echo 2",
+    ]
+
+
+def test_wrapper_guards_side_effecting_commands():
+    script = wrapper_script()
+
+    assert script.count("|| true") >= 5
+    assert "mkdir -p" in script
+    assert "2>/dev/null || true" in script
+
+
+def test_wrapper_touches_stamp_after_writing_shims():
+    script = wrapper_script()
+
+    assert script.rindex('touch "$MCP_ENV/.stamp"') > script.rindex("MCP_SHIM_PIP3")
+
+
+def test_user_script_runs_inside_subshell_before_status_capture():
+    script = wrapper_script()
+
+    assert 'MCP_STATUS=0\n(\n    sh -c "$3"\n)\nMCP_STATUS=$?\n' in script
+
+
+def test_failed_archive_task_raises_instead_of_stale_presign(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
+
+    async def fake_wait_for_task_finish(task_id):
+        return json.dumps({"id": task_id, "state": "SYSTEM_ERROR"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
+
+    with pytest.raises(RuntimeError, match="SYSTEM_ERROR"):
+        asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
+
+
+def test_ensure_object_exists_maps_unexpected_client_error_to_runtime_error(
+    monkeypatch, tes_request
+):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            raise tes_mcp.ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Forbidden"}},
+                "HeadObject",
+            )
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    with pytest.raises(RuntimeError, match="Unable to verify S3 object"):
+        tes_mcp._ensure_object_exists("results/session-123/missing.txt")
+
+
 def test_list_tasks_requests_session_tasks(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
@@ -199,6 +490,7 @@ def test_get_presigned_url_for_session_object(monkeypatch, tes_request):
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
 
     result = asyncio.run(tes_mcp.get_presigned_url("result.txt", ctx=context))
 
@@ -216,6 +508,63 @@ def test_get_presigned_url_rejects_path_traversal(tes_request):
         asyncio.run(tes_mcp.get_presigned_url("../secret.txt", ctx=context))
 
 
+def test_get_presigned_url_rejects_missing_object(monkeypatch, tes_request):
+    context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    def reject_object(key):
+        raise FileNotFoundError(f"S3 object does not exist: {key}")
+
+    monkeypatch.setattr(
+        tes_mcp,
+        "_ensure_object_exists",
+        reject_object,
+    )
+
+    with pytest.raises(FileNotFoundError, match="S3 object does not exist"):
+        asyncio.run(tes_mcp.get_presigned_url("missing.txt", ctx=context))
+
+
+def test_ensure_object_exists_checks_bucket_and_key(monkeypatch, tes_request):
+    calls = []
+
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    tes_mcp._ensure_object_exists("results/session-123/result.txt")
+
+    assert calls == [
+        {
+            "Bucket": "bucket",
+            "Key": "results/session-123/result.txt",
+        }
+    ]
+
+
+def test_ensure_object_exists_reports_missing_object(monkeypatch, tes_request):
+    class FakeS3Client:
+        def head_object(self, **kwargs):
+            raise tes_mcp.ClientError(
+                {
+                    "Error": {
+                        "Code": "404",
+                        "Message": "Not Found",
+                    }
+                },
+                "HeadObject",
+            )
+
+    monkeypatch.setattr(tes_mcp, "_get_s3_client", lambda: FakeS3Client())
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="S3 object does not exist: results/session-123/missing.txt",
+    ):
+        tes_mcp._ensure_object_exists("results/session-123/missing.txt")
+
+
 def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
     monkeypatch.setattr(
@@ -223,15 +572,23 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
         "_generate_presigned_url",
         lambda key: f"https://s3.example/{key}",
     )
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
+    calls = []
+
+    async def fake_wait_for_task_finish(task_id):
+        calls.append(task_id)
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
 
     result = asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
 
     assert json.loads(result) == {
-        "task": {"id": "task-123"},
         "url": "https://s3.example/results/session-123/session-files_session-123.tar.gz",
         "object_key": "results/session-123/session-files_session-123.tar.gz",
         "expires_in": 3600,
     }
+    assert calls == ["task-123"]
     assert tes_request["method"] == "post"
     assert tes_request["json"]["name"] == "tar-session-files"
     assert tes_request["json"]["tags"] == {"MCP-Session-Id": "session-123"}
@@ -246,10 +603,16 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
         "type": "DIRECTORY",
     }
     assert tes_request["json"]["executors"][0]["image"] == "ubuntu:20.04"
-    assert tes_request["json"]["executors"][0]["command"] == [
-        "/bin/sh",
-        "-c",
-        "tar --exclude=./session-files_session-123.tar.gz -czf /archive/session-files_session-123.tar.gz -C /results .",
+    command = tes_request["json"]["executors"][0]["command"]
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        (
+            "tar --exclude=./session-files_session-123.tar.gz"
+            " --exclude=./mcp-env -czf /archive/session-files_session-123.tar.gz"
+            " -C /results ."
+        ),
     ]
 
 
@@ -258,6 +621,13 @@ def test_get_session_files_presigned_url_uses_configured_executor_image(
 ):
     tes_mcp.settings.executor_image = "python:3.12"
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
+
+    monkeypatch.setattr(tes_mcp, "_ensure_object_exists", lambda key: None)
+
+    async def fake_wait_for_task_finish(task_id):
+        return json.dumps({"id": task_id, "state": "COMPLETE"})
+
+    monkeypatch.setattr(tes_mcp, "wait_for_task_finish", fake_wait_for_task_finish)
 
     asyncio.run(tes_mcp.get_session_files_presigned_url(ctx=context))
 
@@ -321,12 +691,137 @@ def test_get_service_info_requests_service_info(monkeypatch, tes_request):
 def test_get_task_encodes_task_id(monkeypatch, tes_request):
     result = asyncio.run(tes_mcp.get_task("task/with spaces"))
 
-    assert json.loads(result) == {"id": "task-123"}
+    assert json.loads(result) == {
+        "task_id": "task-123",
+        "status": None,
+        "logs": None,
+    }
     assert tes_request == {
         "method": "get",
         "path": "/tasks/task%2Fwith%20spaces",
         "params": {"view": "FULL"},
     }
+
+
+def test_sleep_waits_and_returns_success(monkeypatch):
+    waited = []
+
+    async def fake_sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(tes_mcp.sleep(2.5))
+
+    assert waited == [2.5]
+    assert json.loads(result) == {"status": "ok", "slept_seconds": 2.5}
+
+
+def test_sleep_allows_maximum_seconds(monkeypatch):
+    waited = []
+
+    async def fake_sleep(seconds):
+        waited.append(seconds)
+
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(tes_mcp.sleep(300))
+
+    assert waited == [300]
+
+
+def test_sleep_rejects_negative_seconds():
+    with pytest.raises(ValueError, match="seconds must not be negative"):
+        asyncio.run(tes_mcp.sleep(-1))
+
+
+def test_sleep_rejects_nan_and_infinity():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="seconds must be a finite number"):
+            asyncio.run(tes_mcp.sleep(bad))
+
+
+def test_sleep_rejects_seconds_above_maximum():
+    with pytest.raises(ValueError, match="seconds must not exceed 300"):
+        asyncio.run(tes_mcp.sleep(300.1))
+
+
+def test_wait_for_task_finish_polls_until_terminal(monkeypatch, tes_request):
+    responses = iter(
+        [
+            {"id": "task-123", "state": "RUNNING"},
+            {"id": "task-123", "state": "COMPLETE", "logs": ["full task details"]},
+        ]
+    )
+    waits = []
+
+    def fake_tes_request(method, path="/tasks", **kwargs):
+        request = {"method": method, "path": path, **kwargs}
+        tes_request.setdefault("calls", []).append(request)
+        return next(responses)
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(tes_mcp, "_make_tes_request", fake_tes_request)
+    monkeypatch.setattr(tes_mcp.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(tes_mcp.wait_for_task_finish("task-123"))
+
+    assert json.loads(result) == {"id": "task-123", "state": "COMPLETE"}
+    assert tes_request["calls"] == [
+        {
+            "method": "get",
+            "path": "/tasks/task-123",
+            "params": {"view": "FULL"},
+        },
+        {
+            "method": "get",
+            "path": "/tasks/task-123",
+            "params": {"view": "FULL"},
+        },
+    ]
+    assert waits == [1]
+
+
+def test_wait_for_task_finish_returns_fallback_state(monkeypatch, tes_request):
+    monkeypatch.setattr(
+        tes_mcp, "_make_tes_request", lambda *args, **kwargs: {"status": "COMPLETE"}
+    )
+
+    result = asyncio.run(tes_mcp.wait_for_task_finish("task-123"))
+
+    assert json.loads(result) == {"id": "task-123", "state": "COMPLETE"}
+
+
+def test_wait_for_task_finish_rejects_empty_id():
+    with pytest.raises(ValueError, match="task_id must not be empty"):
+        asyncio.run(tes_mcp.wait_for_task_finish("  "))
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "COMPLETE",
+        "EXECUTOR_ERROR",
+        "SYSTEM_ERROR",
+        "CANCELED",
+        "PREEMPTED",
+    ],
+)
+def test_wait_for_task_finish_stops_on_all_tes_terminal_states(state):
+    assert tes_mcp._is_task_finished({"state": state})
+    assert tes_mcp._is_task_finished({"state": state.lower()})
+
+
+def test_wait_for_task_finish_polls_through_canceling():
+    """CANCELING is transient in the TES state machine: keep polling."""
+    assert not tes_mcp._is_task_finished({"state": "CANCELING"})
+
+
+def test_wait_for_task_finish_keeps_polling_on_nonterminal_states():
+    for state in ("RUNNING", "QUEUED", "INITIALIZING", "PAUSED", "UNKNOWN"):
+        assert not tes_mcp._is_task_finished({"state": state})
 
 
 def test_cancel_task_uses_cancel_endpoint(monkeypatch, tes_request):

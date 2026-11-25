@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 import posixpath
 import re
 import uuid
@@ -12,6 +13,7 @@ from urllib.parse import quote, urlsplit
 import boto3  # type: ignore[import-untyped]
 import httpx2
 from botocore.config import Config  # type: ignore[import-untyped]
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 from pydantic import AnyHttpUrl, AnyUrl, Field
@@ -37,12 +39,36 @@ class Settings(BaseSettings):
     presigned_url_expiration: int = Field(default=3600, gt=0, le=604800)
     session_id: str | None = None
     session_id_header_key: str = Field(default="MCP-Session-Id", min_length=1)
-    executor_image: str = Field(default="ubuntu:20.04", min_length=1)
+    executor_image: str = Field(default="ubuntu:26.04", min_length=1)
 
 
 logger = logging.getLogger(__name__)
 mcp = MCPServer("tes")
 settings = Settings()  # type: ignore[call-arg]
+_TERMINAL_TASK_STATES = frozenset(
+    {
+        "COMPLETE",
+        "EXECUTOR_ERROR",
+        "SYSTEM_ERROR",
+        "CANCELED",
+        "PREEMPTED",
+    }
+)
+_MAX_SLEEP_SECONDS = 300
+_ENV_LIVE_DIR = "/tmp/mcp-env"
+
+
+def _get_env_persist_dir() -> str:
+    """Return the bundle location under the configured output directory."""
+    return posixpath.join(settings.output_path, "mcp-env")
+
+
+_WRAPPER_PATH = "/usr/local/bin/mcp-env-wrapper"
+
+
+def _get_wrapper_command(script: str, env_live_dir: str = _ENV_LIVE_DIR) -> list[str]:
+    """Return the executor command running a script inside the env wrapper."""
+    return [_WRAPPER_PATH, _get_env_persist_dir(), env_live_dir, script]
 
 
 @mcp.tool()
@@ -53,8 +79,14 @@ async def run_script(
 ) -> str:
     """Run a shell script and return a temporary URL for its output file.
 
-    Scripts run asynchronously; do not use sleep or wait commands.
-    Sleeping only keeps containers alive without any effect.
+    Scripts run asynchronously; do not use shell sleep or wait commands inside
+    the script — they only keep the container alive. To pace multi-task
+    flows, use the `sleep` and `wait_for_task_finish` tools between tasks.
+
+    A per-session environment is bundled into OUTPUT_PATH/mcp-env/env.tar.gz
+    (default /data/mcp-env/env.tar.gz) and persists between tasks of the same
+    session: `pip install` (via the provided pip/pip3 shims) installs into a
+    persistent PYTHONPATH directory that later tasks reuse automatically.
     """
     if not script.strip():
         raise ValueError("script must not be empty")
@@ -83,11 +115,7 @@ async def run_script(
             {
                 "image": settings.executor_image,
                 "workdir": settings.output_path,
-                "command": [
-                    "/bin/sh",
-                    "-c",
-                    script,
-                ],
+                "command": _get_wrapper_command(script),
             }
         ],
     }
@@ -133,6 +161,7 @@ async def get_presigned_url(object_key: str, ctx: Context) -> str:
     """Return a temporary GET URL for an object in this session's output directory."""
     if session_id := _get_session_id(ctx):
         key = _get_output_object_key(session_id, object_key)
+        await asyncio.to_thread(_ensure_object_exists, key)
         url = await asyncio.to_thread(_generate_presigned_url, key)
         return json.dumps(
             {
@@ -178,23 +207,28 @@ async def get_session_files_presigned_url(ctx: Context) -> str:
                 {
                     "image": settings.executor_image,
                     "workdir": source_path,
-                    "command": [
-                        "/bin/sh",
-                        "-c",
-                        f"tar --exclude=./{archive_name} -czf {archive_output_path}/{archive_name} -C {source_path} .",
-                    ],
+                    "command": _get_wrapper_command(
+                        f"tar --exclude=./{archive_name} --exclude=./mcp-env -czf {archive_output_path}/{archive_name} -C {source_path} ."
+                    ),
                 }
             ],
         }
         task = await asyncio.to_thread(_make_tes_request, "post", json=payload)
+        finished_task = json.loads(await wait_for_task_finish(task["id"]))
+        final_state = finished_task.get("state") or finished_task.get("status") or ""
+        if str(final_state).upper() != "COMPLETE":
+            raise RuntimeError(
+                f"Archive task {task['id']} finished in state {final_state}; "
+                "no fresh session archive was produced"
+            )
         archive_object_key = _get_output_object_key(session_id, archive_name)
+        await asyncio.to_thread(_ensure_object_exists, archive_object_key)
         archive_url = await asyncio.to_thread(
             _generate_presigned_url,
             archive_object_key,
         )
         return json.dumps(
             {
-                "task": task,
                 "url": archive_url,
                 "object_key": archive_object_key,
                 "expires_in": settings.presigned_url_expiration,
@@ -215,14 +249,56 @@ async def get_service_info() -> str:
 
 @mcp.tool()
 async def get_task(task_id: str) -> str:
-    """Return full details and the current status of a submitted task."""
+    """Return only the task ID, current status, and logs of a submitted task."""
     result = await asyncio.to_thread(
         _make_tes_request,
         "get",
         path=_get_task_path(task_id),
         params={"view": "FULL"},
     )
-    return json.dumps(result, indent=2)
+    if "response" in result:
+        return json.dumps(result, indent=2)
+    return json.dumps(
+        {
+            "task_id": result.get("id") or task_id,
+            "status": result.get("state") or result.get("status"),
+            "logs": result.get("logs"),
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def sleep(seconds: float) -> str:
+    """Wait for up to 300 seconds before returning."""
+    if not math.isfinite(seconds):
+        raise ValueError("seconds must be a finite number")
+    if seconds < 0:
+        raise ValueError("seconds must not be negative")
+    if seconds > _MAX_SLEEP_SECONDS:
+        raise ValueError(f"seconds must not exceed {_MAX_SLEEP_SECONDS}")
+
+    await asyncio.sleep(seconds)
+    return json.dumps({"status": "ok", "slept_seconds": seconds}, indent=2)
+
+
+@mcp.tool()
+async def wait_for_task_finish(task_id: str) -> str:
+    """Wait until a submitted task reaches a terminal state."""
+    task_path = _get_task_path(task_id)
+    while True:
+        result = await asyncio.to_thread(
+            _make_tes_request,
+            "get",
+            path=task_path,
+            params={"view": "FULL"},
+        )
+        if _is_task_finished(result):
+            state = result.get("state") or result.get("status") or ""
+            return json.dumps(
+                {"id": result.get("id") or task_id, "state": state}, indent=2
+            )
+        await asyncio.sleep(1)
 
 
 @mcp.tool()
@@ -292,6 +368,12 @@ def _get_task_path(task_id: str, suffix: str = "") -> str:
     return f"/tasks/{quote(task_id, safe='')}{suffix}"
 
 
+def _is_task_finished(task: dict[str, Any]) -> bool:
+    """Return whether a TES task has reached a terminal state."""
+    state = task.get("state") or task.get("status")
+    return isinstance(state, str) and state.upper() in _TERMINAL_TASK_STATES
+
+
 def _get_output_object_key(session_id: str, object_key: str) -> str:
     """Return a safe object key below the session's output directory."""
     object_key = object_key.strip("/")
@@ -318,9 +400,9 @@ def _get_output_bucket() -> str:
     raise ValueError("OUTPUT_URL must include an S3 bucket")
 
 
-def _generate_presigned_url(key: str) -> str:
-    """Generate a temporary read URL for an S3 object."""
-    client = boto3.client(
+def _get_s3_client() -> Any:
+    """Return a configured S3 client."""
+    return boto3.client(
         "s3",
         endpoint_url=str(settings.s3_endpoint_url),
         aws_access_key_id=settings.s3_access_key_id,
@@ -328,6 +410,22 @@ def _generate_presigned_url(key: str) -> str:
         region_name=settings.s3_region,
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
+
+
+def _ensure_object_exists(key: str) -> None:
+    """Raise an explicit error unless the configured S3 object exists."""
+    try:
+        _get_s3_client().head_object(Bucket=_get_output_bucket(), Key=key)
+    except ClientError as error:
+        error_code = error.response.get("Error", {}).get("Code")
+        if error_code in {"404", "NoSuchKey", "NotFound"}:
+            raise FileNotFoundError(f"S3 object does not exist: {key}") from error
+        raise RuntimeError(f"Unable to verify S3 object: {key}") from error
+
+
+def _generate_presigned_url(key: str) -> str:
+    """Generate a temporary read URL for an S3 object."""
+    client = _get_s3_client()
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": _get_output_bucket(), "Key": key},
