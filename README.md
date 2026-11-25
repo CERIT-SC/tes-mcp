@@ -16,7 +16,9 @@ TES (Task Execution Service) as an MCP tool, enabling users to execute scripts i
 Every task starts in a fresh container; only the session directory
 (`OUTPUT_PATH`, `/data` by default) carries over, synced file by file. To
 keep installs persistent without slowing staging, every submitted script is
-wrapped so the session environment lives in a single tarball,
+run through the `mcp-env-wrapper` script baked into the executor image
+(built by `Dockerfile.executor`; set `EXECUTOR_IMAGE` accordingly): the
+session environment lives in a single tarball,
 `$OUTPUT_PATH/mcp-env/env.tar.gz`: unpacked to `/tmp/mcp-env` at task start,
 repacked after the task only if it changed.
 

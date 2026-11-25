@@ -35,6 +35,14 @@ def test_settings_rejects_invalid_tes_url():
         )
 
 
+MODULE_DIR = Path(__file__).parents[1] / "mcp"
+
+
+def wrapper_script() -> str:
+    """Read the env wrapper script baked into the executor image."""
+    return (MODULE_DIR / "env_wrapper.sh").read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def tes_request(monkeypatch):
     request = {}
@@ -83,8 +91,12 @@ def test_run_script_submits_response(monkeypatch, tes_request):
         "type": "DIRECTORY",
     }
     command = tes_request["json"]["executors"][0]["command"]
-    assert command[:2] == ["/bin/sh", "-c"]
-    assert command[2].endswith("\necho 2\n" + tes_mcp._ENV_SYNC_SNIPPET)
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        "echo 2",
+    ]
 
 
 def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
@@ -108,8 +120,12 @@ def test_run_script_returns_requested_file_url(monkeypatch, tes_request):
         "expires_in": 3600,
     }
     command = tes_request["json"]["executors"][0]["command"]
-    assert command[:2] == ["/bin/sh", "-c"]
-    assert command[2].endswith("\necho 2 > text.txt\n" + tes_mcp._ENV_SYNC_SNIPPET)
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        "echo 2 > text.txt",
+    ]
 
 
 def test_run_script_uses_output_directory(monkeypatch, tes_request):
@@ -172,44 +188,47 @@ def test_run_script_uses_configured_executor_image(monkeypatch, tes_request):
     assert tes_request["json"]["executors"][0]["image"] == "python:3.12"
 
 
-def test_wrap_script_wraps_script_between_bootstrap_and_sync():
-    wrapped = tes_mcp._wrap_script_with_env("echo hi")
+def test_wrapper_command_puts_variables_in_argv():
+    tes_mcp.settings.output_path = "/results"
+    try:
+        command = tes_mcp._get_wrapper_command("echo hi")
+    finally:
+        tes_mcp.settings.output_path = "/data"
 
-    assert wrapped.startswith(tes_mcp._get_env_bootstrap_snippet())
-    assert wrapped.endswith(tes_mcp._ENV_SYNC_SNIPPET)
-    assert "\necho hi\n" in wrapped
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        "echo hi",
+    ]
 
 
-def test_bootstrap_uses_output_path_for_env_dir():
+def test_wrapper_command_uses_output_path_for_env_dir():
     original = tes_mcp.settings.output_path
     try:
         tes_mcp.settings.output_path = "/results"
-        bootstrap = tes_mcp._get_env_bootstrap_snippet()
+        command = tes_mcp._get_wrapper_command("echo hi")
     finally:
         tes_mcp.settings.output_path = original
 
-    assert "MCP_ENV_PERSIST=/results/mcp-env" in bootstrap
-    assert (
-        'MCP_ENV_BUNDLE="$MCP_ENV_PERSIST/' + tes_mcp._ENV_BUNDLE_NAME + '"'
-        in bootstrap
-    )
+    assert command[1] == "/results/mcp-env"
 
 
-def test_bootstrap_unpacks_bundle_and_installs_to_target():
-    bootstrap = tes_mcp._get_env_bootstrap_snippet()
+def test_wrapper_unpacks_bundle_and_installs_to_target():
+    script = wrapper_script()
 
-    assert 'tar -xzf "$MCP_ENV_BUNDLE"' in bootstrap
-    assert 'install --target "$MCP_ENV/py"' in bootstrap
-    assert 'PYTHONPATH="$MCP_ENV/py' in bootstrap
-    assert "chmod u+x" in bootstrap
-    assert "$MCP_ENV_PERSIST/.." not in bootstrap
+    assert 'tar -xzf "$MCP_ENV_BUNDLE"' in script
+    assert 'install --target "$MCP_ENV/py"' in script
+    assert 'PYTHONPATH="$MCP_ENV/py' in script
+    assert "chmod u+x" in script
+    assert "$MCP_ENV_PERSIST/.." not in script
 
 
-def test_bootstrap_chmods_only_migration_binary_dirs():
-    preamble = tes_mcp._get_env_bootstrap_snippet()
+def test_wrapper_chmods_only_migration_binary_dirs():
+    script = wrapper_script()
 
-    assert 'find "$MCP_ENV_PERSIST/.."' not in preamble
-    migration_line = next(line for line in preamble.splitlines() if "for d in" in line)
+    assert 'find "$MCP_ENV_PERSIST/.."' not in script
+    migration_line = next(line for line in script.splitlines() if "for d in" in line)
     for d in (
         "bin",
         "py/bin",
@@ -219,23 +238,23 @@ def test_bootstrap_chmods_only_migration_binary_dirs():
         "prefix/usr/local/bin",
     ):
         assert f'"$MCP_ENV_PERSIST/{d}"' in migration_line
-    assert 'find "$d" -maxdepth 1 -type f -exec chmod u+x' in preamble
+    assert 'find "$d" -maxdepth 1 -type f -exec chmod u+x' in script
 
 
-def test_sync_snippet_repacks_bundle_and_preserves_status():
-    sync = tes_mcp._ENV_SYNC_SNIPPET
+def test_wrapper_repacks_bundle_and_preserves_status():
+    script = wrapper_script()
 
-    assert sync.startswith(")\nMCP_STATUS=$?\n")
-    assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in sync
-    assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in sync
-    assert "--ignore-failed-read" in sync
-    assert 'gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz"' in sync
-    assert 'mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"' in sync
-    assert 'rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"' in sync
-    assert 'exit "$MCP_STATUS"' in sync
+    assert ")\nMCP_STATUS=$?\n" in script
+    assert 'find "$MCP_ENV" -newer "$MCP_ENV/.stamp"' in script
+    assert "tar -C \"$MCP_ENV\" --exclude='./.stamp'" in script
+    assert "--ignore-failed-read" in script
+    assert 'gzip -1 -c "$MCP_ENV_BUNDLE.new" > "$MCP_ENV_BUNDLE.new.gz"' in script
+    assert 'mv -f "$MCP_ENV_BUNDLE.new.gz" "$MCP_ENV_BUNDLE"' in script
+    assert 'rm -f "$MCP_ENV_BUNDLE.new" "$MCP_ENV_BUNDLE.new.gz"' in script
+    assert script.endswith('exit "$MCP_STATUS"\n')
 
 
-def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request, tmp_path):
+def test_wrapper_surfaces_repack_failure(monkeypatch, tes_request, tmp_path):
     """A failed bundle repack must not be silent: stderr message + exit 125."""
     root = tmp_path / "root"
     root.mkdir()
@@ -253,11 +272,16 @@ def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request, tmp_path
         fake.chmod(0o755)
 
     def run_wrapped(inner: str, fake: bool) -> subprocess.CompletedProcess:
-        script = tes_mcp._wrap_script_with_env(inner, env_live_dir=str(live))
+        argv = [
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(root / "mcp-env"),
+            str(live),
+            inner,
+        ]
         if fake:
-            script = f'PATH="{fakebin}:$PATH"\n' + script
+            argv = ["/usr/bin/env", f"PATH={fakebin}:{os.environ['PATH']}"] + argv
         return subprocess.run(
-            ["/bin/sh", "-c", script],
+            argv,
             check=False,
             cwd=str(root),
             capture_output=True,
@@ -274,7 +298,7 @@ def test_sync_snippet_surfaces_repack_failure(monkeypatch, tes_request, tmp_path
     assert "failed to persist environment changes" in result.stderr
 
     result = run_wrapped('sleep 1; echo hi > "$MCP_ENV/bin/mytool"', fake=False)
-    assert (root / "mcp-env" / tes_mcp._ENV_BUNDLE_NAME).exists()
+    assert (root / "mcp-env" / "env.tar.gz").exists()
     assert (live / "bin" / "mytool").exists()
 
 
@@ -294,12 +318,13 @@ def test_bootstrap_migration_preserves_home_directory(
     live = tmp_path / "live"
     monkeypatch.setattr(tes_mcp.settings, "output_path", str(tmp_path))
 
-    script = tes_mcp._wrap_script_with_env(
-        'echo "$HOME" > "$MCP_ENV_PERSIST/homedump.txt"',
-        env_live_dir=str(live),
-    )
     result = subprocess.run(
-        ["/bin/sh", "-c", script],
+        [
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(persist),
+            str(live),
+            'echo "$HOME" > "$MCP_ENV_PERSIST/homedump.txt"',
+        ],
         check=False,
         cwd=str(tmp_path),
         capture_output=True,
@@ -313,9 +338,10 @@ def test_bootstrap_migration_preserves_home_directory(
     assert (persist / "homedump.txt").read_text().strip() == str(live / "home")
     probe = subprocess.run(
         [
-            "/bin/sh",
-            "-c",
-            tes_mcp._wrap_script_with_env("mytool", env_live_dir=str(live)),
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(persist),
+            str(live),
+            "mytool",
         ],
         check=False,
         cwd=str(tmp_path),
@@ -346,11 +372,15 @@ def test_bootstrap_failed_migration_preserves_legacy_dirs(
     live.mkdir()
     (live / ".stamp").touch()
 
-    script = f'PATH="{fakebin}:$PATH"\n' + tes_mcp._wrap_script_with_env(
-        "echo done", env_live_dir=str(live)
-    )
     result = subprocess.run(
-        ["/bin/sh", "-c", script],
+        [
+            "/usr/bin/env",
+            f"PATH={fakebin}:{os.environ['PATH']}",
+            str(MODULE_DIR / "env_wrapper.sh"),
+            str(persist),
+            str(live),
+            "echo done",
+        ],
         check=False,
         cwd=str(tmp_path),
         capture_output=True,
@@ -359,18 +389,18 @@ def test_bootstrap_failed_migration_preserves_legacy_dirs(
     )
 
     assert result.returncode == 0, result.stderr
-    assert not (persist / tes_mcp._ENV_BUNDLE_NAME).exists()
+    assert not (persist / "env.tar.gz").exists()
     assert (home / "mydata.txt").read_text() == "precious\n"
     assert (persist / "py").is_dir()
 
 
-def test_bootstrap_migrates_loose_env_dirs_into_bundle():
-    bootstrap = tes_mcp._get_env_bootstrap_snippet()
+def test_wrapper_migrates_loose_env_dirs_into_bundle():
+    script = wrapper_script()
 
-    assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in bootstrap
+    assert '[ -d "$MCP_ENV_PERSIST/venv" ]' in script
 
 
-def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
+def test_run_script_wraps_script_with_env_wrapper(monkeypatch, tes_request):
     context = SimpleNamespace(headers={"MCP-Session-Id": "session-123"})
 
     asyncio.run(
@@ -378,30 +408,32 @@ def test_run_script_wraps_script_with_env_bootstrap(monkeypatch, tes_request):
     )
 
     command = tes_request["json"]["executors"][0]["command"]
-    assert command[:2] == ["/bin/sh", "-c"]
-    assert command[2] == tes_mcp._wrap_script_with_env("echo 2")
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        "echo 2",
+    ]
 
 
-def test_bootstrap_preamble_guards_side_effecting_commands():
-    preamble = tes_mcp._get_env_bootstrap_snippet()
+def test_wrapper_guards_side_effecting_commands():
+    script = wrapper_script()
 
-    assert preamble.count("|| true") >= 5
-    assert "mkdir -p" in preamble
-    assert "2>/dev/null || true" in preamble
+    assert script.count("|| true") >= 5
+    assert "mkdir -p" in script
+    assert "2>/dev/null || true" in script
 
 
-def test_bootstrap_touches_stamp_after_writing_shims():
-    preamble = tes_mcp._get_env_bootstrap_snippet()
+def test_wrapper_touches_stamp_after_writing_shims():
+    script = wrapper_script()
 
-    assert preamble.rindex('touch "$MCP_ENV/.stamp"') > preamble.rindex("MCP_SHIM_PIP3")
+    assert script.rindex('touch "$MCP_ENV/.stamp"') > script.rindex("MCP_SHIM_PIP3")
 
 
 def test_user_script_runs_inside_subshell_before_status_capture():
-    preamble = tes_mcp._get_env_bootstrap_snippet()
-    sync = tes_mcp._ENV_SYNC_SNIPPET
+    script = wrapper_script()
 
-    assert preamble.rstrip("\n").endswith("(")
-    assert sync.startswith(")\nMCP_STATUS=$?\n")
+    assert 'MCP_STATUS=0\n(\n    sh -c "$3"\n)\nMCP_STATUS=$?\n' in script
 
 
 def test_failed_archive_task_raises_instead_of_stale_presign(monkeypatch, tes_request):
@@ -572,11 +604,16 @@ def test_get_session_files_presigned_url_submits_tar_task(monkeypatch, tes_reque
     }
     assert tes_request["json"]["executors"][0]["image"] == "ubuntu:20.04"
     command = tes_request["json"]["executors"][0]["command"]
-    assert command[:2] == ["/bin/sh", "-c"]
-    assert command[2].endswith(
-        "\ntar --exclude=./session-files_session-123.tar.gz --exclude=./mcp-env -czf /archive/session-files_session-123.tar.gz -C /results .\n"
-        + tes_mcp._ENV_SYNC_SNIPPET
-    )
+    assert command == [
+        "/usr/local/bin/mcp-env-wrapper",
+        "/results/mcp-env",
+        "/tmp/mcp-env",
+        (
+            "tar --exclude=./session-files_session-123.tar.gz"
+            " --exclude=./mcp-env -czf /archive/session-files_session-123.tar.gz"
+            " -C /results ."
+        ),
+    ]
 
 
 def test_get_session_files_presigned_url_uses_configured_executor_image(

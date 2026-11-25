@@ -7,7 +7,6 @@ import math
 import posixpath
 import re
 import uuid
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -40,7 +39,7 @@ class Settings(BaseSettings):
     presigned_url_expiration: int = Field(default=3600, gt=0, le=604800)
     session_id: str | None = None
     session_id_header_key: str = Field(default="MCP-Session-Id", min_length=1)
-    executor_image: str = Field(default="ubuntu:20.04", min_length=1)
+    executor_image: str = Field(default="ubuntu:26.04", min_length=1)
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +55,6 @@ _TERMINAL_TASK_STATES = frozenset(
     }
 )
 _MAX_SLEEP_SECONDS = 300
-_ENV_BUNDLE_NAME = "env.tar.gz"
 _ENV_LIVE_DIR = "/tmp/mcp-env"
 
 
@@ -65,32 +63,12 @@ def _get_env_persist_dir() -> str:
     return posixpath.join(settings.output_path, "mcp-env")
 
 
-_MODULE_DIR = Path(__file__).resolve().parent
+_WRAPPER_PATH = "/usr/local/bin/mcp-env-wrapper"
 
 
-def _load_snippet(name: str) -> str:
-    """Read a bundled shell snippet next to this module."""
-    return (_MODULE_DIR / name).read_text(encoding="utf-8")
-
-
-def _get_env_bootstrap_snippet(env_live_dir: str = _ENV_LIVE_DIR) -> str:
-    """Render the bootstrap preamble with the configured paths."""
-    snippet = _load_snippet("env_bootstrap_snippet.sh")
-    for placeholder, value in (
-        ("@ENV_PERSIST_DIR@", _get_env_persist_dir()),
-        ("@ENV_LIVE_DIR@", env_live_dir),
-        ("@ENV_BUNDLE_NAME@", _ENV_BUNDLE_NAME),
-    ):
-        snippet = snippet.replace(placeholder, value)
-    return snippet
-
-
-_ENV_SYNC_SNIPPET = _load_snippet("env_sync_snippet.sh")
-
-
-def _wrap_script_with_env(script: str, env_live_dir: str = _ENV_LIVE_DIR) -> str:
-    """Run a task script inside the persistent-environment bootstrap."""
-    return _get_env_bootstrap_snippet(env_live_dir) + script + "\n" + _ENV_SYNC_SNIPPET
+def _get_wrapper_command(script: str, env_live_dir: str = _ENV_LIVE_DIR) -> list[str]:
+    """Return the executor command running a script inside the env wrapper."""
+    return [_WRAPPER_PATH, _get_env_persist_dir(), env_live_dir, script]
 
 
 @mcp.tool()
@@ -137,11 +115,7 @@ async def run_script(
             {
                 "image": settings.executor_image,
                 "workdir": settings.output_path,
-                "command": [
-                    "/bin/sh",
-                    "-c",
-                    _wrap_script_with_env(script),
-                ],
+                "command": _get_wrapper_command(script),
             }
         ],
     }
@@ -233,13 +207,9 @@ async def get_session_files_presigned_url(ctx: Context) -> str:
                 {
                     "image": settings.executor_image,
                     "workdir": source_path,
-                    "command": [
-                        "/bin/sh",
-                        "-c",
-                        _wrap_script_with_env(
-                            f"tar --exclude=./{archive_name} --exclude=./mcp-env -czf {archive_output_path}/{archive_name} -C {source_path} ."
-                        ),
-                    ],
+                    "command": _get_wrapper_command(
+                        f"tar --exclude=./{archive_name} --exclude=./mcp-env -czf {archive_output_path}/{archive_name} -C {source_path} ."
+                    ),
                 }
             ],
         }
