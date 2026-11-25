@@ -249,14 +249,23 @@ async def get_service_info() -> str:
 
 @mcp.tool()
 async def get_task(task_id: str) -> str:
-    """Return full details and the current status of a submitted task."""
+    """Return only the task ID, current status, and logs of a submitted task."""
     result = await asyncio.to_thread(
         _make_tes_request,
         "get",
         path=_get_task_path(task_id),
         params={"view": "FULL"},
     )
-    return json.dumps(result, indent=2)
+    if "response" in result:
+        return json.dumps(result, indent=2)
+    return json.dumps(
+        {
+            "task_id": result.get("id") or task_id,
+            "status": result.get("state") or result.get("status"),
+            "logs": result.get("logs"),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -267,7 +276,7 @@ async def sleep(seconds: float) -> str:
     if seconds < 0:
         raise ValueError("seconds must not be negative")
     if seconds > _MAX_SLEEP_SECONDS:
-        raise ValueError("seconds must not exceed 300")
+        raise ValueError(f"seconds must not exceed {_MAX_SLEEP_SECONDS}")
 
     await asyncio.sleep(seconds)
     return json.dumps({"status": "ok", "slept_seconds": seconds}, indent=2)

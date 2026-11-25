@@ -691,7 +691,11 @@ def test_get_service_info_requests_service_info(monkeypatch, tes_request):
 def test_get_task_encodes_task_id(monkeypatch, tes_request):
     result = asyncio.run(tes_mcp.get_task("task/with spaces"))
 
-    assert json.loads(result) == {"id": "task-123"}
+    assert json.loads(result) == {
+        "task_id": "task-123",
+        "status": None,
+        "logs": None,
+    }
     assert tes_request == {
         "method": "get",
         "path": "/tasks/task%2Fwith%20spaces",
